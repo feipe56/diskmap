@@ -2,14 +2,38 @@
 
 Índice somente-leitura de vários discos, com análise de redundância e um painel local.
 
-Feito para o caso em que você tem discos externos que vive desconectando, o mesmo
-projeto existe em três lugares, e nenhum deles é o oficial.
+## A dor que isso resolve
+
+Você sabe que a coisa existe em algum lugar. O que você não sabe é em qual disco.
+
+Então começa: abre uma pasta, abre outra, desce três níveis, lembra que talvez esteja
+no HD que está na gaveta, pluga, procura de novo. No fim você acha — ou desiste e baixa
+de novo, e passa a ter duas cópias. A bagunça não vem de desorganização: vem de nunca
+ter tido **visão do todo**.
+
+O Finder não resolve isso porque ele mostra uma pasta por vez, e só das que estão
+montadas agora. Não existe a pergunta "o que eu tenho?" — só "o que tem aqui dentro?".
+
+diskmap lê os diretórios **uma vez**, guarda num índice e passa a responder a partir
+dele, sem abrir pasta nenhuma:
+
+| A pergunta | Como ele responde |
+|---|---|
+| Onde está X? | `search` acha mesmo com o disco desplugado, e diz **qual plugar** |
+| O que eu tenho, somando tudo? | painel com o total por volume, por tipo de conteúdo e por pasta |
+| Onde está o peso? | tamanho recursivo de cada diretório, na profundidade que você pedir |
+| Isso está repetido? | cópias idênticas, **árvores clonadas** e imagens visualmente iguais |
+| O que dá pra apagar? | plano revisável — nada sai do lugar até você rodar o script |
+| Que imagens eu tenho? | galeria com miniatura, separada por biblioteca |
+
+O caso que originou isso: discos externos que vivem desconectados, o mesmo projeto em
+três lugares, e nenhum deles é o oficial.
 
 - **Nada é apagado.** O comando `plan` gera um script que *move* para quarentena,
   junto com um `undo.sh`.
 - **Sem dependências.** Só a biblioteca padrão do Python 3.8+. Nada de pip.
-- **Responde offline.** O índice vive em SQLite, então `search` acha arquivo em
-  disco desplugado e diz qual plugar.
+- **Responde offline.** O índice vive em SQLite: o disco só precisa estar plugado na
+  hora de indexar.
 
 ## Uso
 
