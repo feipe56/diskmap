@@ -96,6 +96,63 @@ def cmd_images(a):
     con.close()
 
 
+def cmd_wipe(a):
+    from . import wipe as wipe_mod
+    con = db.connect(a.db, create=False)
+    from .actions import ensure_log, resolve_target
+    ensure_log(con)
+    import shlex, time
+    try:
+        abspath, kind, label, mount = resolve_target(con, a.path)
+    except ValueError as e:
+        print(f"recusado: {e}", file=sys.stderr)
+        return 1
+    if kind != "file":
+        print("zerar só vale para arquivo, não para pasta", file=sys.stderr)
+        return 1
+
+    av = wipe_mod.assess(mount)
+    size = os.path.getsize(abspath)
+    print(f"{abspath}\n  {db.human(size)} em {label} ({av['fs']})")
+    print(f"\n  garantia aqui: {av['level'].upper()}\n  {av['why']}")
+    if av["snapshots"]:
+        print(f"  {av['snapshots']} snapshots neste volume")
+    if not av["allowed"]:
+        print("\nnão dá para zerar aqui.", file=sys.stderr)
+        return 1
+    for b in wipe_mod.check(abspath):
+        print(f"\nrecusado: {b}", file=sys.stderr)
+        return 1
+
+    if not a.yes:
+        print(f"\nIsto sobrescreve cada byte e "
+              f"{'mantém o arquivo zerado' if a.keep else 'apaga o arquivo'}. "
+              f"NÃO TEM UNDO.")
+        try:
+            if input("digite ZERAR para confirmar: ").strip() != "ZERAR":
+                print("cancelado")
+                return 1
+        except (EOFError, KeyboardInterrupt):
+            print("\ncancelado")
+            return 1
+
+    try:
+        r = wipe_mod.zero_file(abspath, keep=a.keep)
+    except (ValueError, OSError) as e:
+        print(f"falhou: {e}", file=sys.stderr)
+        return 1
+    con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,output) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (int(time.time()), "wipe", abspath, None,
+                 f"wipe {shlex.quote(abspath)}", 0,
+                 f"{r['bytes']} bytes zerados, garantia {av['level']}"))
+    con.commit()
+    con.close()
+    print(f"\n{_n(r['bytes'])} bytes zerados e conferidos"
+          f"{', arquivo apagado' if r['removed'] else ', arquivo mantido zerado'}")
+    return 0
+
+
 def cmd_serve(a):
     from .server import serve
     fresh = not os.path.exists(a.db)
@@ -110,7 +167,8 @@ def cmd_serve(a):
         else:
             print("  vazio ainda. Rode 'diskmap scan <volume>', ou suba com "
                   "--allow-actions para indexar pelo painel.")
-    serve(a.db, a.host, a.port, allow_actions=a.allow_actions)
+    serve(a.db, a.host, a.port, allow_actions=a.allow_actions,
+          allow_wipe=a.allow_wipe)
 
 
 def cmd_search(a):
@@ -219,12 +277,23 @@ def main(argv=None):
                    help="refaz só a biblioteca de cada imagem (segundos, sem sips)")
     s.set_defaults(fn=cmd_images)
 
+    s = sub.add_parser("wipe", help="sobrescreve um arquivo com zeros e apaga "
+                                    "(IRREVERSÍVEL)")
+    s.add_argument("path")
+    s.add_argument("--keep", action="store_true",
+                   help="zera mas não apaga o arquivo")
+    s.add_argument("--yes", action="store_true", help="não pergunta")
+    s.set_defaults(fn=cmd_wipe)
+
     s = sub.add_parser("serve", help="sobe o front em localhost")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8777)
     s.add_argument("--allow-actions", action="store_true", dest="allow_actions",
                    help="libera ações no painel (Finder, quarentena, Lixeira e as "
                         "suas do actions.json). Desligado por padrão.")
+    s.add_argument("--allow-wipe", action="store_true", dest="allow_wipe",
+                   help="libera 'Zerar e apagar' no painel. Irreversível, "
+                        "e exige --allow-actions junto.")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("search", help="onde está X (funciona com disco desconectado)")

@@ -127,8 +127,9 @@ def cold(con, min_size=1_000_000_000, years=2, limit=60):
         "ORDER BY f.size DESC LIMIT ?", (min_size, cutoff, limit))]
 
 
-def action_list(con, allow):
-    return {"allowed": allow, "actions": actions_mod.available() if allow else []}
+def action_list(con, allow, allow_wipe=False):
+    return {"allowed": allow, "allow_wipe": bool(allow_wipe),
+            "actions": actions_mod.available(allow_wipe=allow_wipe) if allow else []}
 
 
 def img_overview(con):
@@ -258,7 +259,7 @@ ROUTES = {
 }
 
 
-def make_handler(db_path, token, allow_actions, origins):
+def make_handler(db_path, token, allow_actions, origins, allow_wipe=False):
     class Handler(BaseHTTPRequestHandler):
         server_version = "diskmap"
 
@@ -323,7 +324,8 @@ def make_handler(db_path, token, allow_actions, origins):
             try:
                 if u.path == "/api/action":
                     res = actions_mod.run(con, str(body.get("id", "")),
-                                          str(body.get("path", "")))
+                                          str(body.get("path", "")),
+                                          allow_wipe=allow_wipe)
                 elif u.path == "/api/undo":
                     res = actions_mod.undo(con, int(body.get("log_id")))
                 else:
@@ -343,9 +345,34 @@ def make_handler(db_path, token, allow_actions, origins):
             if not self._origin_ok():
                 self._send(403, b'{"error":"origem nao permitida"}')
                 return
+            if u.path == "/api/wipe-check":
+                # read-only: says what a wipe would be worth here, before the
+                # user is asked to confirm one. Never writes anything.
+                if not allow_wipe:
+                    self._send(403, b'{"error":"zerar desligado"}')
+                    return
+                from . import wipe as wipe_mod
+                con = db.connect(db_path, create=False)
+                try:
+                    p = (q.get("path") or [""])[0]
+                    ap, kind, label, mount = actions_mod.resolve_target(con, p)
+                    av = wipe_mod.assess(mount)
+                    av["path"] = ap
+                    av["label"] = label
+                    av["refusals"] = (["zerar só vale para arquivo, não para pasta"]
+                                      if kind != "file" else wipe_mod.check(ap))
+                    av["size"] = os.path.getsize(ap) if kind == "file" else None
+                    self._send(200, json.dumps(av, ensure_ascii=False).encode())
+                except (ValueError, OSError) as e:
+                    self._send(400, json.dumps({"error": str(e)},
+                                               ensure_ascii=False).encode())
+                finally:
+                    con.close()
+                return
             if u.path == "/api/actions":
                 self._send(200, json.dumps(
-                    action_list(None, allow_actions), ensure_ascii=False).encode())
+                    action_list(None, allow_actions, allow_wipe),
+                    ensure_ascii=False).encode())
                 return
             if u.path == "/api/log":
                 con = db.connect(db_path, create=False)
@@ -437,29 +464,35 @@ def make_handler(db_path, token, allow_actions, origins):
                     b"</head>",
                     (f'<script>window.DISKMAP_TOKEN={json.dumps(token)};'
                      f'window.DISKMAP_ACTIONS={json.dumps(bool(allow_actions))};'
+                     f'window.DISKMAP_WIPE={json.dumps(bool(allow_wipe))};'
                      f'</script></head>').encode())
             self._send(200, blob, ctype)
 
     return Handler
 
 
-def serve(db_path, host="127.0.0.1", port=8777, allow_actions=False):
+def serve(db_path, host="127.0.0.1", port=8777, allow_actions=False,
+          allow_wipe=False):
     global RUNNER
     RUNNER = jobs_mod.Runner(os.path.abspath(db_path))
     token = secrets.token_urlsafe(24)
     origins = {f"{host}:{port}", f"127.0.0.1:{port}", f"localhost:{port}"}
     httpd = ThreadingHTTPServer((host, port),
-                                make_handler(db_path, token, allow_actions, origins))
-    print(f"diskmap em http://{host}:{port}  (ctrl-c para parar)")
+                                make_handler(db_path, token, allow_actions,
+                                             origins, allow_wipe))
+    print(f"diskmap em http://{host}:{port}  (ctrl-c para parar)", flush=True)
     if allow_actions:
         cfg = actions_mod.load_config()
         n = len(cfg.get("actions", []))
-        print(f"  ações LIGADAS · {n} do actions.json + {len(actions_mod.BUILTIN)} embutidas")
-        print(f"  config: {actions_mod.CONFIG}")
-        print("  remover = Lixeira ou quarentena, com log e undo. Nada de rm.")
-        print("  comandos (scan, analyze, verify, plan) rodam na aba Tarefas")
+        print(f"  ações LIGADAS · {n} do actions.json + {len(actions_mod.BUILTIN)} embutidas", flush=True)
+        print(f"  config: {actions_mod.CONFIG}", flush=True)
+        if allow_wipe:
+            print("  ZERAR LIGADO: 'Zerar e apagar' sobrescreve e remove, SEM UNDO.", flush=True)
+        else:
+            print("  remover = Lixeira ou quarentena, com log e undo. Nada de rm.", flush=True)
+        print("  comandos (scan, analyze, verify, plan) rodam na aba Tarefas", flush=True)
     else:
-        print("  somente leitura. Para agir nos arquivos e rodar comandos: --allow-actions")
+        print("  somente leitura. Para agir nos arquivos e rodar comandos: --allow-actions", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

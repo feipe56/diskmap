@@ -117,8 +117,68 @@ function actCell(path) {
   return `<td class="act"><button class="actbtn" data-act-path="${esc(path)}">ações</button></td>`;
 }
 
+/* Zerar é a única ação sem volta, então ela tem o seu próprio passo: primeiro
+   pergunta ao servidor o que um zero-fill vale naquele volume, e só então deixa
+   confirmar. O usuário decide vendo o motivo, não um aviso genérico. */
+const WIPE_LEVEL = {
+  efetivo: ['ok', 'Efetivo aqui'],
+  parcial: ['warn', 'Garantia parcial'],
+  fraco: ['crit', 'Garantia fraca'],
+  inutil: ['crit', 'Não funciona aqui'],
+  impossivel: ['crit', 'Impossível aqui'],
+};
+
+async function confirmWipe(a, path) {
+  sheet().innerHTML = `<div class="sheet-in"><h3>${esc(a.name)}</h3>
+    <div class="sheet-path">${esc(path)}</div><pre class="out">conferindo o volume…</pre></div>`;
+  const foot = '<div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>';
+  let w;
+  try {
+    w = await api(`/api/wipe-check?path=${encodeURIComponent(path)}`);
+  } catch (e) {
+    sheet().innerHTML = `<div class="sheet-in"><h3>${esc(a.name)}</h3>
+      <div class="sheet-path">${esc(path)}</div>
+      <div class="warnbox crit">${esc(e.message)}</div>${foot}</div>`;
+    sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+    return;
+  }
+  const [cls, title] = WIPE_LEVEL[w.level] || ['crit', w.level];
+  const blocked = !w.allowed || (w.refusals || []).length;
+  const facts = [`${esc(w.fs)}`,
+    w.rotational === true ? 'disco mecânico' : w.rotational === false ? 'memória flash' : null,
+    w.snapshots ? `${N(w.snapshots)} snapshots` : null,
+    w.read_only ? 'montado somente-leitura' : null].filter(Boolean).join(' · ');
+
+  sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true">
+    <h3>${esc(a.name)}</h3>
+    <div class="sheet-path">${esc(path)}</div>
+    <div class="warnbox ${cls}"><b>${esc(title)}.</b> ${esc(w.why)}</div>
+    <p class="note">${esc(w.label)} · ${facts}${
+      w.size != null ? ` · ${H(w.size)}` : ''}</p>
+    ${(w.refusals || []).length
+      ? `<div class="warnbox crit">${w.refusals.map(esc).join('<br>')}</div>` : ''}
+    ${blocked ? '' : `<div class="warnbox crit"><b>Isto não tem undo.</b>
+      Sobrescreve cada byte com zero, confere a leitura e apaga o arquivo.
+      A aba Histórico vai registrar, mas não vai conseguir desfazer.</div>
+      <p class="note">Para confirmar, digite <b>ZERAR</b>:</p>
+      <input id="wipe-ok" class="searchbox" autocomplete="off" spellcheck="false">`}
+    <div class="sheet-foot">
+      <button class="btn" data-close>Cancelar</button>
+      ${blocked ? '' : '<button class="btn danger" data-go disabled>Zerar e apagar</button>'}
+    </div></div>`;
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+  if (blocked) return;
+  const inp = el('wipe-ok');
+  const go = sheet().querySelector('[data-go]');
+  inp.addEventListener('input', () => { go.disabled = inp.value.trim() !== 'ZERAR'; });
+  go.addEventListener('click', () => {
+    if (inp.value.trim() === 'ZERAR') runAction(a, path);
+  });
+  inp.focus();
+}
+
 function openActions(path) {
-  const danger = (a) => a.id === 'trash' || a.id === 'quarantine';
+  const danger = (a) => a.id === 'trash' || a.id === 'quarantine' || a.id === 'wipe';
   sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true" aria-label="Ações">
     <h3>Ações</h3>
     <div class="sheet-path">${esc(path)}</div>
@@ -126,8 +186,9 @@ function openActions(path) {
       <button class="actrow${danger(a) ? ' danger' : ''}" data-run="${esc(a.id)}">
         <span><span class="an">${esc(a.name)}</span>
         ${a.help ? `<span class="ah">${esc(a.help)}</span>` : ''}</span>
-        ${a.mutates ? '<span class="amark">move o arquivo</span>'
-          : (a.capture ? '<span class="amark">mostra saída</span>' : '')}
+        ${a.irreversible ? '<span class="amark">destrói, sem undo</span>'
+          : (a.mutates ? '<span class="amark">move o arquivo</span>'
+          : (a.capture ? '<span class="amark">mostra saída</span>' : ''))}
       </button>`).join('')}</div>
     <div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>
   </div>`;
@@ -136,7 +197,8 @@ function openActions(path) {
     b.addEventListener('click', () => {
       const a = ACTS.find((x) => x.id === b.dataset.run);
       if (!a) return;
-      if (a.confirm || a.mutates) confirmAction(a, path);
+      if (a.id === 'wipe') confirmWipe(a, path);
+      else if (a.confirm || a.mutates) confirmAction(a, path);
       else runAction(a, path);
     });
   });

@@ -77,6 +77,13 @@ BUILTIN = {
               "argv": None, "confirm": True, "mutates": True,
               "help": "vai para a Lixeira do volume; dá para usar "
                       "'Colocar de volta' no Finder"},
+    # Behind its own flag: it is the only action with no way back.
+    "wipe": {"name": "Zerar e apagar", "id": "wipe",
+             "argv": None, "confirm": True, "mutates": True,
+             "irreversible": True, "needs_wipe": True,
+             "help": "sobrescreve cada byte com zero, confere a leitura e então "
+                     "apaga. NÃO TEM UNDO, e o que isso garante depende do "
+                     "filesystem e do disco"},
 }
 
 
@@ -104,10 +111,12 @@ def load_config(path=CONFIG, create=True):
         return {"actions": []}
 
 
-def available(path=CONFIG):
+def available(path=CONFIG, allow_wipe=False):
     """Action descriptors for the UI, with unavailable ones filtered out."""
     out = []
     for a in BUILTIN.values():
+        if a.get("needs_wipe") and not allow_wipe:
+            continue
         out.append({k: v for k, v in a.items() if k != "argv"} | {"builtin": True})
     for a in load_config(path).get("actions", []):
         if not isinstance(a, dict) or "id" not in a or "argv" not in a:
@@ -206,12 +215,41 @@ def do_trash(con, abspath, label, mount):
     return 0, "na Lixeira (use 'Colocar de volta' no Finder)", None
 
 
-def run(con, action_id, raw_path, config_path=CONFIG):
+def do_wipe(abspath, kind, mount):
+    """Zero-fill one file. Refuses anything it cannot actually do.
+
+    A directory is refused outright rather than walked: wiping a tree is a very
+    different promise from wiping a file, and doing it by implication is how
+    someone loses a folder they meant to keep.
+    """
+    from . import wipe as wipe_mod
+    if kind != "file":
+        return 1, "zerar só vale para arquivo, não para pasta", None
+    a = wipe_mod.assess(mount)
+    if not a["allowed"]:
+        return 1, f"não dá para zerar aqui: {a['why']}", None
+    try:
+        r = wipe_mod.zero_file(abspath)
+    except (ValueError, OSError) as e:
+        return 1, str(e), None
+    note = {"efetivo": "", "parcial": " (ATENÇÃO: " + a["why"] + ")",
+            "fraco": " (ATENÇÃO: " + a["why"] + ")",
+            "inutil": " (ATENÇÃO: " + a["why"] + ")"}[a["level"]]
+    return 0, (f"{r['bytes']} bytes zerados e conferidos, arquivo apagado. "
+               f"Garantia neste volume: {a['level']}{note}"), None
+
+
+def run(con, action_id, raw_path, config_path=CONFIG, allow_wipe=False):
     """Execute one named action. Returns a dict for the API."""
     ensure_log(con)
     abspath, kind, label, mount = resolve_target(con, raw_path)
 
-    if action_id == "quarantine":
+    if action_id == "wipe":
+        if not allow_wipe:
+            raise ValueError("zerar está desligado; suba o serve com --allow-wipe")
+        rc, out, moved = do_wipe(abspath, kind, mount)
+        argv = ["<interno>", "zerar"]
+    elif action_id == "quarantine":
         rc, out, moved = do_quarantine(con, abspath, label, mount)
         argv = ["<interno>", "quarentena"]
     elif action_id == "trash":

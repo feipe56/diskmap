@@ -89,6 +89,7 @@ O que protege isso:
 | `subprocess` com argv, `shell=False` | sem injeção de shell |
 | Alvo precisa existir no índice | não dá para apontar para `/etc/passwd` |
 | Remover = Lixeira ou quarentena | nunca `unlink`; sempre reversível |
+| Zerar tem bandeira separada | `--allow-wipe`; é o único caminho irreversível |
 
 ### Rodar os comandos pelo painel
 
@@ -126,6 +127,43 @@ Em `~/.diskmap/actions.json` (criado na primeira execução):
 funcionam — se precisar de pipeline, aponte `argv` para um script seu. `needs` esconde
 a ação quando o programa não está no PATH. `confirm` pede confirmação; `capture` mostra
 a saída.
+
+## Zerar um arquivo (`wipe`)
+
+```bash
+python3 -m diskmap wipe "/Volumes/X/segredo.bin"     # pergunta antes
+python3 -m diskmap serve --allow-actions --allow-wipe # libera no painel
+```
+
+Sobrescreve cada byte com zero, **confere lendo de volta** e então apaga. É a
+única coisa irreversível do diskmap e o único lugar que chama `os.remove`, então
+tem bandeira própria: `--allow-actions` sozinho não libera.
+
+### O que ele consegue prometer depende do disco
+
+Antes de escrever qualquer coisa, o `assess()` responde quanto um zero-fill vale
+naquele volume, e o painel mostra isso **antes** de pedir confirmação:
+
+| Veredito | Quando | O que significa |
+|---|---|---|
+| `efetivo` | sem copy-on-write, disco mecânico | o setor magnético é sobrescrito de verdade |
+| `parcial` | sem copy-on-write, memória flash | o controlador remapeia a escrita; as páginas físicas originais só somem no garbage collection |
+| `fraco` | APFS | copy-on-write: escrever aloca blocos **novos**, e os antigos guardam os bytes originais |
+| `inutil` | APFS com snapshot | o snapshot **fixa** os blocos antigos de propósito |
+| `impossivel` | volume somente-leitura | recusado: nada pode ser escrito |
+
+É por isso que a Apple removeu o "Esvaziar Lixeira com Segurança" no 10.11. Para
+um disco inteiro, a única garantia real é apagar o disco inteiro — `diskutil
+secureErase`, ou criptografia desde o começo.
+
+### O que ele recusa
+
+Hard link (zerar destruiria o conteúdo visto pelos outros nomes), link simbólico
+(não tocaria o destino), pasta (zerar uma árvore é outra promessa), volume
+somente-leitura, e qualquer caminho fora do índice. Se a leitura de verificação
+achar um byte não-zero, o arquivo **não** é apagado.
+
+O `action_log` registra, mas a aba Histórico não desfaz — não há o que desfazer.
 
 ## As regras da sua máquina
 
@@ -279,8 +317,10 @@ já existe — sem reescanear nada.
 | `jobs.py` | roda os comandos do diskmap como subprocesso, com log, lock e cancelamento |
 | `images.py` | miniatura, dimensão, hash perceptual e biblioteca, via `sips` |
 | `userconf.py` | as regras da sua máquina, lidas de `~/.diskmap/rules.json` |
+| `wipe.py` | zero-fill com verificação, e o veredito honesto por volume |
 | `tests/test_classify.py` | fixa as regras de biblioteca que já quebraram |
 | `tests/test_blobs.py` | fixa o veredito de pasta agregada: `.git` nunca sai |
+| `tests/test_wipe.py` | fixa as recusas do zerar (hard link, symlink, pasta) |
 | `web/` | front: HTML, CSS e um `app.js` sem build |
 
 ## Notas
