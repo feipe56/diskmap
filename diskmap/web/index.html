@@ -1,0 +1,56 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>diskmap</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <p class="eyebrow">índice local &middot; somente leitura</p>
+      <h1>diskmap</h1>
+      <p class="sub" id="sub">carregando índice…</p>
+    </div>
+    <div class="spacer"></div>
+    <div class="searchbox">
+      <input type="search" id="q" placeholder="onde está… (funciona offline)"
+             autocomplete="off" aria-label="Buscar arquivo ou pasta">
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" id="tabs">
+    <button role="tab" data-p="resumo" aria-selected="true">Resumo</button>
+    <button role="tab" data-p="liberar" aria-selected="false">Liberar</button>
+    <button role="tab" data-p="arvores" aria-selected="false">Árvores clonadas</button>
+    <button role="tab" data-p="duplicatas" aria-selected="false">Duplicatas</button>
+    <button role="tab" data-p="pastas" aria-selected="false">Pastas</button>
+    <button role="tab" data-p="frio" aria-selected="false">Dado frio</button>
+    <button role="tab" data-p="busca" aria-selected="false">Busca</button>
+    <button role="tab" data-p="imagens" aria-selected="false">Imagens</button>
+    <button role="tab" data-p="tarefas" aria-selected="false">Tarefas</button>
+    <button role="tab" data-p="historico" aria-selected="false">Histórico</button>
+  </nav>
+
+  <section class="panel" id="p-resumo"></section>
+  <section class="panel" id="p-liberar" hidden></section>
+  <section class="panel" id="p-arvores" hidden></section>
+  <section class="panel" id="p-duplicatas" hidden></section>
+  <section class="panel" id="p-pastas" hidden></section>
+  <section class="panel" id="p-frio" hidden></section>
+  <section class="panel" id="p-busca" hidden></section>
+  <section class="panel" id="p-imagens" hidden></section>
+  <section class="panel" id="p-tarefas" hidden></section>
+  <section class="panel" id="p-historico" hidden></section>
+</div>
+<div id="tip" role="status"></div>
+<div class="sheet" id="sheet" hidden></div>
+<div class="viewer" id="viewer" hidden></div>
+<div id="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>

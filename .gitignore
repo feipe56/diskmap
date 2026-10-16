@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+diskmap-plan/
+.DS_Store
+
+# Memória do projeto: contexto da *minha* máquina (labels de volume, caminhos,
+# números dos meus discos). Fica local de propósito.
+CLAUDE.md

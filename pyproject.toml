@@ -1,0 +1,22 @@
+[project]
+name = "diskmap"
+version = "0.1.0"
+description = "Índice somente-leitura de vários discos, com análise de redundância e painel local"
+requires-python = ">=3.8"
+dependencies = []
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+readme = "README.md"
+
+[project.scripts]
+diskmap = "diskmap.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["diskmap"]
+
+[tool.setuptools.package-data]
+diskmap = ["web/*"]
