@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS stat_rollup (
   files INTEGER,
   PRIMARY KEY (kind, key)
 );
+
+-- An aggregated dir (node_modules, .git, build caches) judged against what it
+-- would cost to get it back. Derived from blobs + files: recomputable.
+CREATE TABLE IF NOT EXISTS blob_reclaim (
+  blob    INTEGER PRIMARY KEY REFERENCES blobs(id),
+  vol     INTEGER NOT NULL,
+  relpath TEXT NOT NULL,
+  kind    TEXT NOT NULL,
+  proj    TEXT,             -- the dir that owns it, '' at the volume root
+  verdict TEXT NOT NULL,    -- 'cache' | 'manifesto' | 'sem-prova' | 'vcs'
+  proof   TEXT,             -- the manifest found, NULL when there is none
+  last    INTEGER,          -- newest mtime among the project's own files
+  bytes   INTEGER,
+  files   INTEGER
+);
 """
 
 INDEXES = """
@@ -129,6 +144,7 @@ CREATE INDEX IF NOT EXISTS dirs_rel    ON dirs(vol, relpath);
 CREATE INDEX IF NOT EXISTS dup_mem_grp ON dup_members(grp);
 CREATE INDEX IF NOT EXISTS dup_mem_f   ON dup_members(file);
 CREATE INDEX IF NOT EXISTS roll_bytes  ON dir_rollup(bytes DESC);
+CREATE INDEX IF NOT EXISTS br_verdict  ON blob_reclaim(verdict, bytes DESC);
 """
 
 

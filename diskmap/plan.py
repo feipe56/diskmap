@@ -45,10 +45,11 @@ def write_plan(con, out_dir, quarantine=None, only_verified=True, categories=Non
     """Emit plan.tsv, apply.sh and undo.sh.
 
     quarantine=None puts each file under <its volume>/.diskmap-quarantine.
-    Returns (count, bytes, tsv, sh, undo, warnings).
+    Returns (entries, dirs, bytes, tsv, sh, undo, warnings), where `dirs` counts
+    the entries that are whole aggregated directories rather than single files.
     """
     os.makedirs(out_dir, exist_ok=True)
-    by, pervol, n, drop = recoverable(con)
+    by, pervol, n, drop, bdrop = recoverable(con)
 
     verified = set()
     for r in con.execute(
@@ -60,7 +61,7 @@ def write_plan(con, out_dir, quarantine=None, only_verified=True, categories=Non
         "SELECT label, mount FROM volumes")}
 
     cats = set(categories) if categories else None
-    rows = []
+    rows, ndirs = [], 0
     for fid, (cat, size) in sorted(drop.items(), key=lambda kv: -kv[1][1]):
         if cats and cat not in cats:
             continue
@@ -81,6 +82,23 @@ def write_plan(con, out_dir, quarantine=None, only_verified=True, categories=Non
         else:
             dst = os.path.join(r["mount"], QUAR_NAME, rel)
         rows.append((cat, size, r["label"], src, dst))
+
+    # Aggregated dirs move as one directory, which is a single rename for the
+    # whole subtree - a node_modules of 60k files costs one syscall, not 60k.
+    if not cats or "build/dep parado" in cats:
+        for _, kind, size, label, mount, rel, verdict, last in bdrop:
+            if size < min_size or not mount:
+                continue
+            src = os.path.join(mount, rel)
+            dst = (os.path.join(quarantine, label, rel) if quarantine
+                   else os.path.join(mount, QUAR_NAME, rel))
+            rows.append(("build/dep parado", size, label, src, dst))
+            ndirs += 1
+
+    # biggest first, so a plan read top-down is read in order of what it frees.
+    # Safe to reorder: an aggregated dir contributes no rows to `files`, so no
+    # entry here is ever inside another.
+    rows.sort(key=lambda r: -r[1])
 
     when = time.strftime("%Y-%m-%d %H:%M")
     tsv = os.path.join(out_dir, "plan.tsv")
@@ -127,4 +145,4 @@ def write_plan(con, out_dir, quarantine=None, only_verified=True, categories=Non
         except OSError:
             pass
 
-    return len(rows), sum(r[1] for r in rows), tsv, sh, undo, warnings
+    return len(rows), ndirs, sum(r[1] for r in rows), tsv, sh, undo, warnings

@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import actions as actions_mod
 from . import db
 from . import jobs as jobs_mod
-from .analyze import recoverable
+from .analyze import BLOB_STALE_YEARS, recoverable
 
 RUNNER = None   # set by serve(); the job registry lives for the server's lifetime
 
@@ -19,7 +19,7 @@ def overview(con):
     vols = [dict(r) for r in con.execute(
         "SELECT label, mount, capacity, free, files, bytes, scanned_at "
         "FROM volumes ORDER BY bytes DESC")]
-    by, pervol, n, _ = recoverable(con)
+    by, pervol, n, _, bdrop = recoverable(con)
     stats = {}
     for kind in ("class", "age", "ext", "junk"):
         stats[kind] = [dict(r) for r in con.execute(
@@ -32,8 +32,15 @@ def overview(con):
     blobs = [dict(r) for r in con.execute(
         "SELECT kind, SUM(bytes) bytes, SUM(files) files FROM blobs "
         "GROUP BY kind ORDER BY bytes DESC LIMIT 12")]
+    br = {r["verdict"]: dict(r) for r in con.execute(
+        "SELECT verdict, COUNT(*) dirs, COALESCE(SUM(bytes),0) bytes, "
+        "COALESCE(SUM(files),0) files FROM blob_reclaim GROUP BY verdict")}
     return {
         "volumes": vols, "stats": stats, "blobs": blobs,
+        "blob_reclaim": {"by_verdict": br,
+                         "stale": {"dirs": len(bdrop),
+                                   "bytes": sum(b[2] for b in bdrop),
+                                   "years": BLOB_STALE_YEARS}},
         "recoverable": {"by": by, "pervol": pervol, "files": n,
                         "total": sum(by.values())},
         "dup": {"groups": dup["g"], "wasted": dup["w"], "verified": ver},
@@ -188,6 +195,47 @@ def img_groups(con, q):
     return {"groups": out, "count": tot["n"] or 0, "wasted": tot["w"] or 0}
 
 
+def blob_list(con, q):
+    """Aggregated dirs with their verdict, for the consolidated panel.
+
+    `verdict` filters; `min_years` keeps only the ones whose project has been
+    quiet that long. Read-only: the row carries the path, and acting on it goes
+    through the same action layer as everything else.
+    """
+    import time as _t
+    verdict = (q.get("verdict") or [None])[0]
+    min_years = (q.get("min_years") or [None])[0]
+    limit = min(int(q.get("limit", ["80"])[0]), 500)
+    sql = ("SELECT b.blob, b.kind, b.relpath, b.verdict, b.proof, b.last, "
+           "b.bytes, b.files, v.label, v.mount FROM blob_reclaim b "
+           "JOIN volumes v ON v.id=b.vol")
+    args, where = [], []
+    if verdict in ("cache", "manifesto", "sem-prova", "vcs"):
+        where.append("b.verdict = ?")
+        args.append(verdict)
+    if min_years:
+        try:
+            cut = _t.time() - float(min_years) * 365 * 86400
+        except ValueError:
+            cut = None
+        if cut is not None:
+            where.append("b.last IS NOT NULL AND b.last <= ?")
+            args.append(cut)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY b.bytes DESC LIMIT ?"
+    args.append(limit)
+    now = _t.time()
+    out = []
+    for r in con.execute(sql, args):
+        d = dict(r)
+        d["years"] = round((now - r["last"]) / (365 * 86400), 1) if r["last"] else None
+        d["path"] = os.path.join(r["mount"], r["relpath"]) if r["mount"] else None
+        d["offerable"] = r["verdict"] in ("cache", "manifesto")
+        out.append(d)
+    return {"rows": out, "stale_years": BLOB_STALE_YEARS}
+
+
 ROUTES = {
     "/api/overview": lambda con, q: overview(con),
     "/api/dups":     lambda con, q: dup_list(con, int(q.get("limit", ["60"])[0]),
@@ -206,6 +254,7 @@ ROUTES = {
     "/api/images":   lambda con, q: img_list(con, q),
     "/api/img-overview": lambda con, q: img_overview(con),
     "/api/img-groups":   lambda con, q: img_groups(con, q),
+    "/api/blobs":    lambda con, q: blob_list(con, q),
 }
 
 

@@ -156,6 +156,15 @@ def resolve_target(con, raw):
                 "WHERE v.label=? AND d.relpath=? LIMIT 1", (label, rel)).fetchone()
             if hit:
                 return p, "dir", label, mount
+            # An aggregated dir (node_modules, .git, a build cache) is a real
+            # directory the index holds as one row in `blobs`; the scanner never
+            # walks into it, so it appears in neither table above. Without this
+            # lookup the Liberar tab could list it and no action could touch it.
+            hit = con.execute(
+                "SELECT 1 FROM blobs b JOIN volumes v ON v.id=b.vol "
+                "WHERE v.label=? AND b.relpath=? LIMIT 1", (label, rel)).fetchone()
+            if hit:
+                return p, "dir", label, mount
             raise ValueError("esse caminho não está no índice "
                              "(reindexe o volume se ele é novo)")
     raise ValueError("caminho fora dos volumes indexados")

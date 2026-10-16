@@ -50,10 +50,13 @@ def cmd_verify(a):
 def cmd_plan(a):
     from .plan import write_plan
     con = db.connect(a.db)
-    n, total, tsv, sh, undo, warns = write_plan(
+    n, ndirs, total, tsv, sh, undo, warns = write_plan(
         con, a.out, a.quarantine, only_verified=not a.unverified,
         categories=a.category or None, min_size=a.min_size)
-    print(f"{_n(n)} arquivos, {db.human(total)}")
+    what = f"{_n(n - ndirs)} arquivos"
+    if ndirs:
+        what += f" e {_n(ndirs)} pastas de build/dep"
+    print(f"{what}, {db.human(total)}")
     print(f"  plano:   {tsv}")
     print(f"  aplicar: bash {sh}")
     print(f"  desfazer: bash {undo}")
@@ -192,7 +195,8 @@ def main(argv=None):
                    help="pasta única (atravessa volumes e exige espaço livre); "
                         "o padrão é .diskmap-quarantine dentro de cada volume")
     s.add_argument("--category", action="append",
-                   choices=("duplicata", "arquivo+extraido", "dump/temp"))
+                   choices=("duplicata", "arquivo+extraido", "dump/temp",
+                            "build/dep parado"))
     s.add_argument("--min-size", type=int, default=0, dest="min_size")
     s.add_argument("--unverified", action="store_true",
                    help="inclui duplicatas sem confirmação por hash")

@@ -25,6 +25,7 @@ dele, sem abrir pasta nenhuma:
 | Isso está repetido? | cópias idênticas, **árvores clonadas** e imagens visualmente iguais |
 | O que dá pra apagar? | plano revisável — nada sai do lugar até você rodar o script |
 | Que imagens eu tenho? | galeria com miniatura, separada por biblioteca |
+| Que projeto meu já morreu? | `node_modules` e build de projeto que você não toca há anos |
 
 O caso que originou isso: discos externos que vivem desconectados, o mesmo projeto em
 três lugares, e nenhum deles é o oficial.
@@ -45,7 +46,7 @@ python3 -m diskmap scan ~ --label Casa --root Documents --root Desktop
 # ou importar um índice TSV que você já tem
 python3 -m diskmap import caminho/para/index.tsv
 
-# calcular achados
+# calcular achados (duplicata, árvore clonada, build/dep parado)
 python3 -m diskmap analyze
 
 # ver no navegador
@@ -218,6 +219,50 @@ saiu dele conta duas vezes o mesmo acervo.
 **Tamanho recursivo de pasta.** `dir_rollup` cobra cada byte de todos os diretórios
 acima dele, então "onde o peso está" responde na profundidade que você pedir.
 
+**`node_modules` e build de projeto que morreu.** Um buscador de duplicata não olha
+isso porque não é duplicata de nada. Veja abaixo.
+
+## Build e dependência de projeto parado
+
+Um `node_modules` de 1,6 GB num projeto que você não abre desde 2024 é desperdício puro:
+o `package.json` ao lado recria ele inteiro. A aba **Liberar** mostra essas pastas com
+filtro por idade, e elas entram no `plan` como categoria própria:
+
+```bash
+python3 -m diskmap plan --out ./plano --category 'build/dep parado'
+```
+
+Mover a pasta toda é **um** rename para a subárvore inteira — um `node_modules` de 60 mil
+arquivos custa uma syscall, não 60 mil.
+
+### O que decide é a prova, não o nome da pasta
+
+| Veredito | O que é | Pode sair? |
+|---|---|---|
+| `cache` | a ferramenta refaz sozinha onde quer que esteja (`.gradle`, `.npm`, `__pycache__`) | sim |
+| `manifesto` | reconstruível, e o arquivo que reconstrói está na raiz do projeto | sim |
+| `sem-prova` | nada no disco prova que isso se recria | **não**, só reportado |
+| `vcs` | `.git`, `.svn`, `.hg` | **nunca**, em idade nenhuma |
+
+O nome da pasta não prova nada, e `site-packages` é a armadilha: dentro de um venv é
+descartável, mas em `tools_ng/bin/python/App/Lib/site-packages` é o runtime Python que a
+ferramenta embarca, e nada no mundo o reconstrói. Por isso ele é `sem-prova` e nunca é
+oferecido. `node_modules` sem `package.json` ao lado cai na mesma regra.
+
+E `.git` não é dependência baixada, é o histórico. Se ele não estiver num remoto, apagar
+é perda definitiva — então nenhuma regra, nenhum corte de idade e nenhum filtro o
+alcançam.
+
+### "Parado" é o projeto, não a pasta
+
+A data vem do arquivo mais recente **do projeto**, não da pasta agregada. A mtime de um
+`node_modules` conta quando você rodou `npm install`, o que não diz nada sobre o projeto
+estar vivo. Dois `node_modules` idênticos, um de projeto editado anteontem e outro de
+projeto parado há dois anos: só o segundo é oferecido.
+
+Como a pasta agregada não contribui com linha nenhuma em `files`, isso sai do índice que
+já existe — sem reescanear nada.
+
 ## Estrutura
 
 | Arquivo | Papel |
@@ -235,6 +280,7 @@ acima dele, então "onde o peso está" responde na profundidade que você pedir.
 | `images.py` | miniatura, dimensão, hash perceptual e biblioteca, via `sips` |
 | `userconf.py` | as regras da sua máquina, lidas de `~/.diskmap/rules.json` |
 | `tests/test_classify.py` | fixa as regras de biblioteca que já quebraram |
+| `tests/test_blobs.py` | fixa o veredito de pasta agregada: `.git` nunca sai |
 | `web/` | front: HTML, CSS e um `app.js` sem build |
 
 ## Notas
@@ -244,8 +290,8 @@ sempre, mas "quase" não serve para apagar. Um grupo que divergir no hash é mar
 como `mismatch` e nunca entra no plano.
 
 Pastas agregadas (`node_modules`, `.git`, `.venv`, `Pods`…) entram como uma linha com
-o total, não arquivo por arquivo. São reconstruíveis: contam como espaço ocupado, não
-como acervo a organizar.
+o total, não arquivo por arquivo. Ser reconstruível não as tira da conta — é o motivo
+de serem oferecidas; veja a seção acima.
 
 ## Licença
 

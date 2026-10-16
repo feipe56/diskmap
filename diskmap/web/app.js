@@ -38,6 +38,13 @@ const CAT = {
   duplicata: 'Cópias idênticas (mesmo nome e tamanho)',
   'arquivo+extraido': 'Compactado com a pasta extraída ao lado',
   'dump/temp': 'Crash dumps, .tmp e cache',
+  'build/dep parado': 'node_modules e build de projeto parado',
+};
+const VERDICT = {
+  cache: ['Cache', 'A ferramenta refaz sozinha, onde quer que esteja.'],
+  manifesto: ['Reconstruível', 'O manifesto que recria está na raiz do projeto.'],
+  'sem-prova': ['Sem prova', 'Nada no disco prova que isso se reconstrói. Só reportado.'],
+  vcs: ['Repositório', 'É o histórico em si. Nunca é oferecido, em idade nenhuma.'],
 };
 
 /* ---------- small renderers ---------- */
@@ -748,7 +755,78 @@ async function panelLiberar() {
   h += `<p class="note">Para gerar o plano de quarentena:
     <code>diskmap plan --out ./plano</code>. Ele <b>move</b> para uma pasta de
     quarentena e escreve um <code>undo.sh</code> — nada é apagado.</p>`;
+
+  h += `<h3 style="margin:34px 0 4px">Build e dependência</h3>
+    <div id="blob-head"></div><div id="blob-body" class="empty">carregando…</div>`;
   el('p-liberar').innerHTML = h;
+  renderBlobHead();
+  loadBlobs();
+}
+
+/* ---------- aggregated dirs: node_modules, caches, .git ---------- */
+let BLOB_YEARS = '1';
+
+function renderBlobHead() {
+  const br = (OV.blob_reclaim || {}).by_verdict || {};
+  const order = ['cache', 'manifesto', 'sem-prova', 'vcs'];
+  const cards = order.filter((k) => br[k]).map((k) => {
+    const d = br[k];
+    const [name, why] = VERDICT[k];
+    const cls = (k === 'cache' || k === 'manifesto') ? 'ok' : 'off';
+    return `<div class="tile"><div class="k">${esc(name)}</div>
+      <div class="v ${cls}">${H(d.bytes)}</div>
+      <div class="s">${N(d.dirs)} pastas · ${esc(why)}</div></div>`;
+  }).join('');
+
+  const opts = [['0', 'qualquer idade'], ['1', 'parado há 1 ano+'],
+                ['2', '2 anos+'], ['3', '3 anos+']]
+    .map(([v, l]) => `<option value="${v}"${v === BLOB_YEARS ? ' selected' : ''}>${l}</option>`)
+    .join('');
+
+  el('blob-head').innerHTML = `
+    <p>Pastas que o scan agrega numa linha só. Nunca foram oferecidas porque são
+    reconstruíveis — que é justamente o motivo para oferecê-las. O que decide não é o
+    nome da pasta: é existir prova de que algo a recria.</p>
+    <div class="tiles" style="margin:14px 0">${cards}</div>
+    <p class="note"><b>O <code>.git</code> nunca entra.</b> Ele não é dependência
+    baixada, é o histórico. Some com ele e o que não estiver num remoto acabou.</p>
+    <div class="gridbar" style="margin-top:16px">
+      <select id="blob-years">${opts}</select>
+      <span class="count" id="blob-count"></span></div>`;
+
+  el('blob-years').onchange = (e) => { BLOB_YEARS = e.target.value; loadBlobs(); };
+}
+
+async function loadBlobs() {
+  const body = el('blob-body');
+  body.className = 'empty';
+  body.textContent = 'carregando…';
+  const y = BLOB_YEARS === '0' ? '' : `&min_years=${encodeURIComponent(BLOB_YEARS)}`;
+  let d;
+  try {
+    d = await api(`/api/blobs?limit=120${y}`);
+  } catch (err) {
+    body.textContent = 'falhou: ' + err.message;
+    return;
+  }
+  const rows = (d.rows || []).filter((r) => r.offerable);
+  const tot = rows.reduce((a, r) => a + r.bytes, 0);
+  body.className = '';
+  const cnt = el('blob-count');
+  if (cnt) cnt.textContent = rows.length ? `${H(tot)} em ${N(rows.length)} pastas` : '';
+  if (!rows.length) {
+    body.innerHTML = `<div class="empty">nada reconstruível nesse corte de idade</div>`;
+    return;
+  }
+  const when = (r) => (r.years == null ? '—'
+    : r.years < 1 ? `${Math.round(r.years * 365)} d` : `${r.years} a`);
+  body.innerHTML = `<p class="note">A coluna <b>parado</b> é o último toque nos arquivos
+      <i>do projeto</i>, não na pasta: um <code>node_modules</code> de projeto vivo não é
+      desperdício, é o seu próximo build.</p>`
+    + table(['Pasta', 'Tamanho', 'Arquivos', 'Parado', 'Prova', ''],
+      rows.map((r) => [
+        tdp(`${r.label}/${r.relpath}`), tdn(H(r.bytes)), tdn(N(r.files)),
+        tdn(when(r)), tdn(esc(r.proof || '—')), actCell(r.path)]));
 }
 
 async function panelArvores() {

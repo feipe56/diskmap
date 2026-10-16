@@ -27,12 +27,44 @@ ARCHIVE_EXTS = {"zip", "rar", "7z", "tar", "gz", "iso"}
 JUNK_EXTS = {"dmp", "tmp", "cache", "crash", "crdownload", "part"}
 
 # directories recorded as one aggregate row instead of being walked
-BLOB_DIRS = {
-    "node_modules", ".git", ".svn", ".hg", "Pods", ".gradle", ".venv", "venv",
-    "__pycache__", ".next", ".nuxt", "target", ".cargo", ".rustup", ".npm",
-    ".pub-cache", ".cocoapods", ".conda", "site-packages", ".terraform",
-    "DerivedData", ".tox", "bower_components", ".pnpm-store", ".yarn",
+# Aggregated directories, split by *what it costs to get them back*. This split
+# is the whole safety argument for offering to clean them, so it is explicit.
+#
+# The name of a folder proves nothing by itself. `site-packages` is the classic
+# trap: inside a virtualenv it is throwaway, but at
+# `<some-tool>/bin/python/App/Lib/site-packages` it is the Python runtime that
+# tool ships with, and nothing on earth rebuilds it. It therefore belongs to
+# none of the sets below - it gets reported and never offered.
+
+# The repository itself. Deleting one destroys history that may exist nowhere
+# else, so it is NEVER offered for removal, at any age, under any rule.
+VCS_DIRS = {".git", ".svn", ".hg"}
+
+# A cache the tool refills by itself, wherever it sits. Safe to drop with no
+# further evidence; the cost of being wrong is a slow next build.
+CACHE_DIRS = {
+    ".gradle", ".npm", ".pub-cache", ".cocoapods", ".conda", ".rustup",
+    ".cargo", ".pnpm-store", "__pycache__", "DerivedData", ".tox",
 }
+
+# Rebuildable only if the thing that rebuilds it is still on disk. The manifest
+# is the proof; without it we cannot claim the folder is recoverable.
+MANIFEST_DIRS = {
+    "node_modules":     ("package.json",),
+    ".next":            ("package.json",),
+    ".nuxt":            ("package.json",),
+    ".yarn":            ("package.json",),
+    "bower_components": ("bower.json", "package.json"),
+    ".venv":            ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py"),
+    "venv":             ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py"),
+    "Pods":             ("Podfile",),
+    "target":           ("Cargo.toml", "pom.xml", "build.sbt"),
+    ".terraform":       ("main.tf",),
+}
+
+# Aggregated during the scan: recorded as one row with a total instead of walked
+# file by file. `site-packages` is here but in none of the sets above, on purpose.
+BLOB_DIRS = (VCS_DIRS | CACHE_DIRS | set(MANIFEST_DIRS) | {"site-packages"})
 # skipped entirely: OS bookkeeping with no organizational value
 SKIP_DIRS = {
     "$RECYCLE.BIN", "System Volume Information", "$Recycle.Bin", "$WinREAgent",

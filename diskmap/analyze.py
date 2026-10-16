@@ -14,6 +14,8 @@ MIN_DUP_SIZE = 1_000_000       # ignore small-file noise
 MIN_FP_SIZE = 65_536           # tree fingerprint floor
 MIN_JUNK_SIZE = 1_000_000
 MIN_OVERLAP = 500_000_000      # only report tree pairs sharing this much
+BLOB_STALE_YEARS = 1           # an aggregated dir is only waste once the
+                               # project that owns it has gone quiet
 
 # Paths a launcher or package manager owns. Removing one file from inside a game
 # install corrupts it, and the manager will just re-download anyway, so these are
@@ -260,6 +262,109 @@ def tree_overlap(con, depth=2, verbose=True):
     return rows
 
 
+def blob_reclaim(con, verbose=True):
+    """Judge each aggregated dir by what it would cost to get it back.
+
+    These folders are already in the index, as one row with a total - they were
+    never offered up because the README called them "reconstructible, so they
+    count as space used, not as a collection to organize". That is exactly
+    backwards for cleaning: reconstructible is the *reason* to offer them.
+
+    Three verdicts can be acted on, one cannot:
+
+      cache      a tool refills it by itself, wherever it sits
+      manifesto  rebuildable, and the manifest that rebuilds it is still there
+      sem-prova  no evidence anything rebuilds it - reported, never offered
+      vcs        the repository itself - never offered, at any age
+
+    Staleness comes from the project's own files, not from the folder: a
+    node_modules whose project was last touched in 2022 is dead weight, and the
+    folder's own mtime says nothing about that. The aggregated dir contributes no
+    rows to `files`, so this needs no rescan.
+    """
+    from .classify import VCS_DIRS, CACHE_DIRS, MANIFEST_DIRS
+    t0 = time.time()
+    con.execute("DELETE FROM blob_reclaim")
+    rows = list(con.execute("SELECT id, vol, relpath, kind, bytes, files FROM blobs"))
+    out = []
+    for r in rows:
+        kind, rel = r["kind"], r["relpath"]
+        proj = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        proof = None
+        if kind in VCS_DIRS:
+            verdict = "vcs"
+        elif kind in CACHE_DIRS:
+            verdict, proof = "cache", "cache"
+        elif kind in MANIFEST_DIRS:
+            want = MANIFEST_DIRS[kind]
+            pr = con.execute("SELECT id FROM dirs WHERE vol=? AND relpath=?",
+                             (r["vol"], proj)).fetchone()
+            if pr:
+                qs = ",".join("?" * len(want))
+                got = con.execute(
+                    f"SELECT name FROM files WHERE dir=? AND "
+                    f"name COLLATE NOCASE IN ({qs})", (pr["id"],) + want).fetchone()
+                proof = got["name"] if got else None
+            verdict = "manifesto" if proof else "sem-prova"
+        else:
+            verdict = "sem-prova"
+
+        last = None
+        if verdict != "vcs":
+            # prefix range over the (vol, relpath) index: '/' is 0x2F and '0' is
+            # 0x30, so [proj+'/', proj+'0') is exactly the subtree of proj
+            if proj:
+                q = ("SELECT MAX(f.mtime) m FROM files f WHERE f.dir IN "
+                     "(SELECT id FROM dirs WHERE vol=? AND "
+                     "(relpath=? OR (relpath>=? AND relpath<?)))")
+                args = (r["vol"], proj, proj + "/", proj + "0")
+            else:
+                q = "SELECT MAX(f.mtime) m FROM files f WHERE f.vol=?"
+                args = (r["vol"],)
+            last = con.execute(q, args).fetchone()["m"]
+
+        out.append((r["id"], r["vol"], rel, kind, proj, verdict, proof, last,
+                    r["bytes"], r["files"]))
+
+    con.executemany(
+        "INSERT INTO blob_reclaim (blob,vol,relpath,kind,proj,verdict,proof,last,"
+        "bytes,files) VALUES (?,?,?,?,?,?,?,?,?,?)", out)
+    con.commit()
+    if verbose:
+        agg = collections.Counter()
+        for o in out:
+            agg[o[5]] += o[8]
+        parts = ", ".join(f"{k} {db.human(v)}" for k, v in agg.most_common())
+        print(f"  pastas agregadas: {len(out)} ({parts}) em {time.time()-t0:.0f}s",
+              file=sys.stderr)
+    return len(out)
+
+
+def blob_drop(con, max_age_years=None):
+    """The aggregated dirs that may be offered, newest-project-first excluded.
+
+    Returns [(blob_id, kind, bytes, label, mount, relpath, verdict, last)].
+    `vcs` and `sem-prova` never come back from here. A protected path never does
+    either: a cache inside a launcher install is the launcher's business.
+    """
+    now = time.time()
+    out = []
+    for r in con.execute(
+            "SELECT b.blob, b.kind, b.bytes, b.relpath, b.verdict, b.last, "
+            "v.label, v.mount FROM blob_reclaim b JOIN volumes v ON v.id=b.vol "
+            "WHERE b.verdict IN ('cache','manifesto') ORDER BY b.bytes DESC"):
+        if keep_score(r["relpath"])[0] == 0:
+            continue
+        if max_age_years is not None:
+            if not r["last"]:
+                continue
+            if (now - r["last"]) / YEAR < max_age_years:
+                continue
+        out.append((r["blob"], r["kind"], r["bytes"], r["label"], r["mount"],
+                    r["relpath"], r["verdict"], r["last"]))
+    return out
+
+
 def recoverable(con):
     """Union of the redundancy categories, counting each file exactly once.
 
@@ -312,7 +417,16 @@ def recoverable(con):
                     f"SELECT f.id, v.label FROM files f JOIN volumes v ON v.id=f.vol "
                     f"WHERE f.id IN ({q})", chunk):
                 pervol[r["label"]] += drop[r["id"]][1]
-    return dict(by), dict(pervol), len(drop), drop
+
+    # Aggregated dirs are a disjoint fifth category: the scanner records them as
+    # one row and never walks inside, so not one byte here is already counted
+    # above. Only the stale ones make the headline - a node_modules whose project
+    # you touched last week is not waste, it is your next build.
+    bdrop = blob_drop(con, max_age_years=BLOB_STALE_YEARS)
+    for _, _, b, label, _, _, _, _ in bdrop:
+        by["build/dep parado"] += b
+        pervol[label] += b
+    return dict(by), dict(pervol), len(drop), drop, bdrop
 
 
 def run_all(con, depth=2, verbose=True):
@@ -323,8 +437,10 @@ def run_all(con, depth=2, verbose=True):
     duplicates(con, verbose)
     archive_pairs(con, verbose)
     tree_overlap(con, depth, verbose)
-    by, pervol, n, _ = recoverable(con)
+    blob_reclaim(con, verbose)
+    by, pervol, n, _, bdrop = recoverable(con)
     if verbose:
-        print(f"  recuperável (união): {db.human(sum(by.values()))} em {n} arquivos", file=sys.stderr)
+        print(f"  recuperável (união): {db.human(sum(by.values()))} em {n} arquivos "
+              f"+ {len(bdrop)} pastas de build/dep", file=sys.stderr)
         print(f"concluído em {time.time()-t0:.0f}s", file=sys.stderr)
     return by, pervol, n
