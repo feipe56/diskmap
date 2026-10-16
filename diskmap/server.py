@@ -237,6 +237,12 @@ def blob_list(con, q):
     return {"rows": out, "stale_years": BLOB_STALE_YEARS}
 
 
+def _health(con):
+    """SMART por disco. Leitura pura: só consulta diskutil e smartctl."""
+    from . import health
+    return health.report(con)
+
+
 ROUTES = {
     "/api/overview": lambda con, q: overview(con),
     "/api/dups":     lambda con, q: dup_list(con, int(q.get("limit", ["60"])[0]),
@@ -256,6 +262,7 @@ ROUTES = {
     "/api/img-overview": lambda con, q: img_overview(con),
     "/api/img-groups":   lambda con, q: img_groups(con, q),
     "/api/blobs":    lambda con, q: blob_list(con, q),
+    "/api/health":   lambda con, q: _health(con),
 }
 
 

@@ -96,6 +96,32 @@ def cmd_images(a):
     con.close()
 
 
+def cmd_health(a):
+    from . import health
+    con = db.connect(a.db, create=False)
+    rep = health.report(con)
+    con.close()
+    SEV = {"crit": "CRÍTICO", "warn": "ATENÇÃO", "ok": "ok",
+           "desconhecido": "desconhecido"}
+    for d in rep["disks"]:
+        media = {True: "SSD", False: "HDD", None: "?"}[d["solid_state"]]
+        print(f"\n{d['dev']}  {d['model']}")
+        print(f"  {media} · {d['protocol']} · {db.human(d['size'])}"
+              f"{' · externo' if d['removable'] else ''}")
+        print(f"  SMART: {SEV.get(d['level'], d['level'])} — {d['why']}")
+        if d["volumes"]:
+            print(f"  volumes: {', '.join(d['volumes'])} · {db.human(d['indexado'])} "
+                  f"indexados, {db.human(d['so_aqui'])} sem cópia conhecida fora daqui")
+        for s in d["signals"]:
+            mark = {"crit": "!!", "warn": " !", "ok": "  "}.get(s["level"], "  ")
+            print(f"   {mark} {s['key']:<22} {s['value']}")
+    if not rep["smartctl"]:
+        print("\nO macOS só expõe um booleano, e ele só vira quando o disco já")
+        print("passou do limite do fabricante. Para os atributos que avisam antes")
+        print(f"(setor realocado, setor pendente, desgaste):  {rep['hint']}")
+    return 0
+
+
 def cmd_wipe(a):
     from . import wipe as wipe_mod
     con = db.connect(a.db, create=False)
@@ -276,6 +302,9 @@ def main(argv=None):
     s.add_argument("--reclassify", action="store_true",
                    help="refaz só a biblioteca de cada imagem (segundos, sem sips)")
     s.set_defaults(fn=cmd_images)
+
+    s = sub.add_parser("health", help="SMART e identidade de cada disco físico")
+    s.set_defaults(fn=cmd_health)
 
     s = sub.add_parser("wipe", help="sobrescreve um arquivo com zeros e apaga "
                                     "(IRREVERSÍVEL)")

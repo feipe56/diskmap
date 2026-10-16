@@ -789,9 +789,63 @@ async function panelResumo() {
       bars(o.blobs.map((b) => ({ label: b.kind, value: b.bytes,
         tip: `${b.kind}: ${H(b.bytes)} em ${N(b.files)} arquivos` })))}
       <p class="note"><b>node_modules</b>, <b>.git</b> e afins entram como um número só.
-      São reconstruíveis — contam como espaço, não como acervo.</p>`;
+      Ser reconstruível não as tira da conta — veja a aba Liberar.</p>`;
   }
+  h += `<h3 style="margin:28px 0 12px">Saúde dos discos</h3>
+    <div id="health" class="empty">lendo SMART…</div>`;
   el('p-resumo').innerHTML = h;
+  loadHealth();
+}
+
+/* ---------- SMART ---------- */
+const HL = {
+  crit: ['crit', 'Crítico'], warn: ['warn', 'Atenção'],
+  ok: ['ok', 'Sem atributo preocupante'], desconhecido: ['', 'Desconhecido'],
+};
+
+async function loadHealth() {
+  const box = el('health');
+  if (!box) return;
+  let r;
+  try {
+    r = await api('/api/health');
+  } catch (e) {
+    box.textContent = 'não deu para ler: ' + e.message;
+    return;
+  }
+  box.className = '';
+  const media = (d) => (d.solid_state === true ? 'SSD'
+    : d.solid_state === false ? 'disco mecânico' : 'mídia desconhecida');
+
+  box.innerHTML = r.disks.map((d) => {
+    const [cls, title] = HL[d.level] || ['', d.level];
+    const sigs = d.signals.length
+      ? `<div class="tw"><table><tbody>${d.signals.map((s) => `<tr>
+          <td class="path"><span class="hi">${esc(s.key.replace(/_/g, ' '))}</span></td>
+          <td class="num">${esc(s.value)}</td>
+          <td class="s" style="color:var(--fg-3)">${esc(s.help)}</td></tr>`).join('')}
+        </tbody></table></div>` : '';
+    const vols = d.volumes.length
+      ? `<p class="note">${esc(d.volumes.join(', '))} · ${H(d.indexado)} indexados,
+         <b>${H(d.so_aqui)}</b> sem cópia conhecida em outro volume</p>`
+      : '<p class="note">nenhum volume indexado neste disco</p>';
+    return `<div class="box" style="margin-bottom:14px">
+      <div class="vol-r1"><span class="vol-name">${esc(d.model)}</span>
+        <span class="badge ${cls}">${esc(title)}</span></div>
+      <p class="s" style="color:var(--fg-2)">${esc(d.dev)} · ${media(d)} ·
+        ${esc(d.protocol)} · ${H(d.size)}${d.removable ? ' · externo' : ''}</p>
+      <div class="warnbox ${cls}">${esc(d.why)}</div>
+      ${vols}${sigs}</div>`;
+  }).join('');
+
+  if (!r.smartctl) {
+    box.innerHTML += `<div class="offnote"><b>O macOS só entrega um booleano.</b>
+      Ele vira <code>Failing</code> quando o disco já passou do limite do fabricante —
+      tarde demais para ser aviso. O estudo do Google com mais de cem mil discos achou
+      que mais da metade dos que falharam nunca acusou nada nos atributos mais fortes.
+      <p style="margin-top:10px">Para ver setor realocado, setor pendente e desgaste de
+      flash: <code>${esc(r.hint)}</code></p></div>`;
+  }
 }
 
 async function panelLiberar() {

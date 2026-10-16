@@ -26,6 +26,7 @@ dele, sem abrir pasta nenhuma:
 | O que dá pra apagar? | plano revisável — nada sai do lugar até você rodar o script |
 | Que imagens eu tenho? | galeria com miniatura, separada por biblioteca |
 | Que projeto meu já morreu? | `node_modules` e build de projeto que você não toca há anos |
+| Meus discos estão bem? | SMART por disco, e quanto você perderia se aquele morrer |
 
 O caso que originou isso: discos externos que vivem desconectados, o mesmo projeto em
 três lugares, e nenhum deles é o oficial.
@@ -127,6 +128,40 @@ Em `~/.diskmap/actions.json` (criado na primeira execução):
 funcionam — se precisar de pipeline, aponte `argv` para um script seu. `needs` esconde
 a ação quando o programa não está no PATH. `confirm` pede confirmação; `capture` mostra
 a saída.
+
+## Saúde dos discos (`health`)
+
+```bash
+python3 -m diskmap health        # ou a seção no fim da aba Resumo
+```
+
+Identidade de cada disco físico (modelo, barramento, SSD ou mecânico, tamanho),
+o estado SMART, e — o que nenhum utilitário de SMART sabe — **quanto do seu
+acervo mora ali e quanto disso não tem cópia conhecida em outro volume**. SMART
+feio num disco inteiramente replicado é aborrecimento; o mesmo SMART no disco que
+guarda a única cópia de 300 GB é outra conversa.
+
+### Por que `Verified` não quer dizer saudável
+
+O macOS entrega um booleano e nada mais. Ele só vira `Failing` quando o disco já
+passou dos limites do fabricante — tarde demais para servir de aviso. O estudo do
+Google de 2007, com mais de cem mil discos, achou que **mais da metade** dos que
+falharam nunca acusou nada nos atributos mais fortes.
+
+Por isso, sem `smartctl` o veredito aqui nunca passa de **desconhecido**, mesmo
+com o macOS dizendo `Verified`. Fingir que o booleano basta seria o erro.
+
+```bash
+brew install smartmontools     # aí sim: os atributos que avisam antes
+```
+
+Com ele: setor pendente e setor incorrigível (**crítico** — são os que preveem
+falha), setor realocado e erro CRC (atenção), desgaste e reserva de flash, horas
+ligado, temperatura. Ponte USB costuma não deixar o comando passar; o `health`
+tenta `-d sat` e `-d nvme` antes de desistir.
+
+Desligamento sujo é mostrado mas **não** alarma: toda máquina acumula alguns, e
+isso fala de risco de arquivo corrompido, não de disco falhando.
 
 ## Zerar um arquivo (`wipe`)
 
@@ -318,9 +353,11 @@ já existe — sem reescanear nada.
 | `images.py` | miniatura, dimensão, hash perceptual e biblioteca, via `sips` |
 | `userconf.py` | as regras da sua máquina, lidas de `~/.diskmap/rules.json` |
 | `wipe.py` | zero-fill com verificação, e o veredito honesto por volume |
+| `health.py` | SMART por disco físico, cruzado com o que o índice guarda |
 | `tests/test_classify.py` | fixa as regras de biblioteca que já quebraram |
 | `tests/test_blobs.py` | fixa o veredito de pasta agregada: `.git` nunca sai |
 | `tests/test_wipe.py` | fixa as recusas do zerar (hard link, symlink, pasta) |
+| `tests/test_health.py` | fixa a leitura do smartctl com saída real |
 | `web/` | front: HTML, CSS e um `app.js` sem build |
 
 ## Notas
