@@ -325,6 +325,8 @@ def overlap_files(con, a, b, limit=400):
     if sa is None or sb is None:
         return {"a": a, "b": b, "total": 0, "bytes": 0, "rows": [],
                 "erro": "árvore não encontrada no índice"}
+    monta = {r["id"]: r["mount"] for r in con.execute(
+        "SELECT id, mount FROM volumes")}
     # The depth is whatever the analyze run used, and the labels carry it: the
     # remainder after the volume label IS the prefix. Derived, never guessed.
     depth = max(len(sa[1].split("/")) if sa[1] else 0,
@@ -340,19 +342,38 @@ def overlap_files(con, a, b, limit=400):
     ordem = sorted(shared, key=lambda k: (-k[1], k[0]))[:limit]
     ids = [x["id"] for k in ordem for x in fa[k] + fb[k]]
     hs = _verdicts(con, ids)
+    # O índice é uma fotografia, e esta tela oferece botões que apagam. Entre a
+    # varredura e agora o arquivo pode ter ido para a quarentena pelo próprio
+    # painel, para a Lixeira, ou ter sido apagado por fora. `dup_detail` já
+    # conferia isso nos grupos de duplicata; aqui não conferia nada, e uma
+    # linha de par clonado continuava oferecendo "descartar" um lado que já
+    # não existia.
+    from . import actions as _act
+    fora = _act.fora_do_lugar(con)
+    montado = {}                      # um stat por volume, não por linha
     rows = []
+    nao_ok = 0
     for k in ordem:
         ra, rb = fa[k][0], fb[k][0]
+        a_rel = ("%s/%s" % (ra["relpath"], ra["name"])).lstrip("/")
+        b_rel = ("%s/%s" % (rb["relpath"], rb["name"])).lstrip("/")
+        ma, mb = monta.get(sa[0]), monta.get(sb[0])
+        a_est = _act.estado_no_disco(os.path.join(ma, a_rel) if ma else None,
+                                     fora, ma, montado)
+        b_est = _act.estado_no_disco(os.path.join(mb, b_rel) if mb else None,
+                                     fora, mb, montado)
+        nao_ok += (a_est != "ok") + (b_est != "ok")
         rows.append({
             "name": ra["name"], "size": k[1], "cls": ra["cls"],
             "mtime_a": ra["mtime"], "mtime_b": rb["mtime"],
-            "a_path": ("%s/%s" % (ra["relpath"], ra["name"])).lstrip("/"),
-            "b_path": ("%s/%s" % (rb["relpath"], rb["name"])).lstrip("/"),
+            "a_path": a_rel, "b_path": b_rel,
+            "a_estado": a_est, "b_estado": b_est,
             "a_extra": len(fa[k]) - 1, "b_extra": len(fb[k]) - 1,
             "verdict": _verdict(hs.get(ra["id"]), hs.get(rb["id"])),
         })
     return {"a": a, "b": b, "a_label": a.split("/")[0], "b_label": b.split("/")[0],
-            "total": total, "bytes": bytes_, "shown": len(rows), "rows": rows}
+            "total": total, "bytes": bytes_, "shown": len(rows), "rows": rows,
+            "nao_ok": nao_ok}
 
 
 def archive_pairs(con, verbose=True):

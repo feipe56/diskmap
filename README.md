@@ -421,6 +421,15 @@ sustenta o par — nome, tamanho, o caminho de cada lado, a data de cada cópia 
 veredito de hash de quem já passou pelo `verify`. É a diferença entre "estas duas
 pastas têm 23,6 GB iguais" e "são estes 12 arquivos, e destes, N estão provados".
 
+Cada lado da linha também diz se o arquivo **ainda está lá**. O índice é uma
+fotografia: entre a varredura e agora a cópia pode ter ido para a quarentena pelo
+próprio painel, para a Lixeira, ou ter sido apagada por fora. Quem saiu do lugar
+ganha etiqueta, as ações daquela linha ficam desligadas, e um aviso no topo diz
+quantas das cópias listadas não estão mais onde o índice as viu. Volume
+desconectado é dito com essas palavras e não como "apagado" — num disco que não
+está plugado todo arquivo some do `exists`, e as duas afirmações pedem coisas
+bem diferentes de você.
+
 Com `--allow-actions`, cada linha dessa lista oferece duas ações, e elas fazem
 coisas diferentes: **descartar** manda uma das cópias para a quarentena e libera
 o espaço dela; **sincronizar** faz um lado virar cópia do outro e não libera

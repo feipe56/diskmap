@@ -1135,7 +1135,17 @@ function twigBody(d, i) {
   const cols = ['Arquivo', 'Tamanho', 'Prova', `em ${esc(d.a_label)}`, 'quando',
     `em ${esc(d.b_label)}`, 'quando'];
   if (ACTIONS_ON) cols.push('');
-  return `<div class="twigbox">
+  // Dito antes da tabela, não só na linha: com 400 linhas ninguém descobre
+  // lendo. O índice é uma fotografia e esta tela oferece botões que apagam.
+  const fora = d.nao_ok
+    ? `<div class="warnbox warn"><b>${N(d.nao_ok)} de ${N(d.shown * 2)} cópias
+       desta lista não estão onde o índice viu.</b> Podem ter ido para a
+       quarentena pelo painel, para a Lixeira, ou ter sido apagadas por fora —
+       cada linha diz qual. Para essas, descartar e sincronizar estão
+       desligados. Rode <b>Indexar um volume</b> e <b>Recalcular achados</b>
+       para a lista voltar a bater com o disco.</div>`
+    : '';
+  return `<div class="twigbox">${fora}
     <p class="note">${N(d.total)} arquivos com o mesmo nome e o mesmo tamanho nas
       duas árvores, somando <b>${H(d.bytes)}</b>. A coluna <b>prova</b> é só o que o
       <code>verify</code> já conferiu por hash — sem ela, nome e tamanho é
@@ -1148,17 +1158,26 @@ function twigBody(d, i) {
       const linha = [
         `<td class="path"><span class="hi">${esc(x.name)}</span></td>`,
         tdn(H(x.size)), tdn(VER_TAG[x.verdict] || VER_TAG.no),
-        `<td class="path">${esc(x.a_path)}${mais(x.a_extra)}</td>`,
+        `<td class="path">${esc(x.a_path)}${mais(x.a_extra)}${estTag(x.a_estado)}</td>`,
         tdn(mes(x.mtime_a)),
-        `<td class="path">${esc(x.b_path)}${mais(x.b_extra)}</td>`,
+        `<td class="path">${esc(x.b_path)}${mais(x.b_extra)}${estTag(x.b_estado)}</td>`,
         tdn(mes(x.mtime_b))];
       if (ACTIONS_ON) {
         // Dois verbos porque são duas operações diferentes, e confundi-las é
         // caro: sincronizar iguala os dois lados e não libera nada; descartar
         // tira um do caminho e libera o tamanho dele.
-        linha.push(`<td class="act">
-          <button class="actbtn" data-descartar="${i}:${j}">descartar</button>
-          <button class="actbtn" data-resolve="${i}:${j}">sincronizar</button></td>`);
+        // Nenhum dos dois faz sentido quando um lado já saiu do lugar: não há
+        // par a resolver, e o botão só levaria a um erro lá na frente.
+        const falta = (x.a_estado && x.a_estado !== 'ok')
+          || (x.b_estado && x.b_estado !== 'ok');
+        const porque = x.a_estado === 'desmontado' || x.b_estado === 'desmontado'
+          ? 'o volume de um dos lados não está conectado'
+          : 'um dos lados já saiu do lugar';
+        linha.push(falta
+          ? `<td class="act" title="${esc(porque)}"><span class="tag">—</span></td>`
+          : `<td class="act">
+            <button class="actbtn" data-descartar="${i}:${j}">descartar</button>
+            <button class="actbtn" data-resolve="${i}:${j}">sincronizar</button></td>`);
       }
       return linha;
     }))}
@@ -1640,6 +1659,17 @@ async function listaAcervo(corpo) {
     listaAcervo(corpo);
   }));
 }
+
+/* O que o índice NÃO sabe sozinho: o arquivo ainda está onde foi visto?
+   'ok' não ganha etiqueta — a ausência de aviso já é a informação, e marcar o
+   caso normal faria o anormal desaparecer no meio. */
+const EST_TAG = {
+  quarentena: '<span class="tag warn">na quarentena</span>',
+  lixeira: '<span class="tag warn">na Lixeira</span>',
+  sumido: '<span class="tag crit">não está mais no disco</span>',
+  desmontado: '<span class="tag">volume desconectado</span>',
+};
+const estTag = (e) => (e && e !== 'ok' ? ` ${EST_TAG[e] || ''}` : '');
 
 const VER_TAG = {
   full: '<span class="tag ok">hash completo</span>',

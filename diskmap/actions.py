@@ -92,6 +92,57 @@ def ensure_log(con):
     con.commit()
 
 
+# Ações que tiram o arquivo de onde ele estava. `undo` devolve.
+SAIDAS = {"discard-clone": "quarentena", "quarantine": "quarentena",
+          "trash": "lixeira"}
+
+
+def fora_do_lugar(con):
+    """{caminho absoluto: 'quarentena'|'lixeira'} pelo diário de ações.
+
+    Só a ÚLTIMA ação de cada caminho conta. `undo` devolve o arquivo e grava
+    outra linha em vez de apagar a anterior, então quem olhasse qualquer linha
+    diria "está na quarentena" para sempre, inclusive do que já voltou.
+
+    Isto responde metade da pergunta "esse arquivo ainda está lá?". A outra
+    metade é o disco: o usuário pode ter apagado por fora, e disso o diário não
+    sabe nada. Quem mostra uma lista de candidatos precisa das duas.
+    """
+    ensure_log(con)
+    fora = {}
+    for r in con.execute(
+            "SELECT path, action FROM action_log "
+            "WHERE action IN (%s) OR action = 'undo' ORDER BY at, id"
+            % ",".join("?" * len(SAIDAS)), tuple(SAIDAS)):
+        if r["action"] == "undo":
+            fora.pop(r["path"], None)
+        else:
+            fora[r["path"]] = SAIDAS[r["action"]]
+    return fora
+
+
+def estado_no_disco(abspath, fora, raiz=None, _mem=None):
+    """'ok' | 'quarentena' | 'lixeira' | 'sumido' | 'desmontado'.
+
+    `raiz` é o ponto de montagem do volume, e a ordem importa: num volume que
+    não está plugado TODO arquivo some do `os.path.exists`, e chamar isso de
+    "sumido" seria dizer que foi apagado. São afirmações diferentes -- uma pede
+    ação, a outra pede um cabo USB.
+    """
+    if not abspath:
+        return "desmontado"
+    if raiz is not None:
+        if _mem is None:
+            _mem = {}
+        if raiz not in _mem:
+            _mem[raiz] = os.path.isdir(raiz)
+        if not _mem[raiz]:
+            return "desmontado"
+    if os.path.exists(abspath):
+        return "ok"
+    return fora.get(abspath) or "sumido"
+
+
 def load_config(path=CONFIG, create=True):
     if not os.path.exists(path):
         if create:
