@@ -50,8 +50,11 @@ python3 -m diskmap import caminho/para/index.tsv
 # calcular achados (duplicata, árvore clonada, build/dep parado)
 python3 -m diskmap analyze
 
+# miniaturas
+python3 -m diskmap images         # imagens: miniatura, dimensão, hash visual, biblioteca
+python3 -m diskmap acervo --cls video   # vídeo, documento e afins
+
 # ver no navegador
-python3 -m diskmap images         # miniatura, dimensão, hash visual, biblioteca
 python3 -m diskmap serve          # http://127.0.0.1:8777
 
 # onde está isso?
@@ -75,6 +78,15 @@ aberta no seu navegador, então executar comando não fica ligado sem você pedi
 ```bash
 python3 -m diskmap serve --allow-actions
 ```
+
+**Aviso.** Com `--allow-actions` ligado, o painel executa comandos na sua máquina
+e move arquivos seus. Você assume o risco de tudo que rodar com essa bandeira
+ativa: nem o projeto nem seus autores respondem por perda, corrupção ou
+indisponibilidade de dado nenhum. Isto inclui os comandos que você mesmo declarar
+no `actions.json`, que rodam exatamente como escritos. O software é distribuído
+sem garantia de espécie alguma, nos termos da GPL-3.0 que acompanha o repositório
+— leia as seções 15 e 16 da licença. Se o dado importa, tenha backup antes de
+ligar a bandeira, e prefira rodar sem ela quando só quiser olhar.
 
 Ligado, cada linha do painel ganha um botão **ações**: abrir no Finder, abrir a pasta,
 mover para quarentena, mover para a Lixeira, e o que você declarar. Tudo fica na aba
@@ -163,6 +175,42 @@ tenta `-d sat` e `-d nvme` antes de desistir.
 Desligamento sujo é mostrado mas **não** alarma: toda máquina acumula alguns, e
 isso fala de risco de arquivo corrompido, não de disco falhando.
 
+## Atividade: quem está lendo e gravando agora (`io`)
+
+```bash
+python3 -m diskmap io                 # uma janela de 2 s
+python3 -m diskmap io --watch         # fica repetindo até Ctrl-C
+```
+
+Ou a aba **Atividade** no painel, que se atualiza sozinha a cada 2 segundos.
+
+São **duas** medidas do kernel, e elas respondem perguntas diferentes:
+
+| | |
+|---|---|
+| por disco | `ioreg`, classe `IOBlockStorageDriver`: bytes lidos e gravados por dispositivo, separados |
+| por processo | `proc_pid_rusage`: bytes lidos e gravados por processo — é o que o Monitor de Atividade mostra |
+
+### Por que a soma dos processos não fecha com a soma dos discos
+
+Porque o kernel **não cruza as duas**: o contador do processo não guarda em qual
+disco o byte caiu. A coluna "volumes abertos" vem do `lsof` — quais volumes o
+processo tem abertos neste instante — e é **palpite de onde ele escreve, não
+prova de onde o byte caiu**. Um processo com arquivo aberto em dois discos
+aparece nos dois.
+
+Três outros motivos, todos esperados:
+
+- processo de outro usuário (root, em geral) recusa o contador sem `sudo` — é por
+  isso que o `backupd` escrevendo no disco do Time Machine aparece no disco e não
+  na lista de processos;
+- processo que nasceu e morreu dentro da janela não tem dois pontos para
+  subtrair, então some da lista — mas o contador do dispositivo o inclui;
+- leitura servida pelo cache de página não toca o disco.
+
+O cruzamento exato existe — `sudo fs_usage -w -f filesys` mostra o caminho de
+cada chamada — mas exige root, e nada aqui pede root para olhar.
+
 ## Zerar um arquivo (`wipe`)
 
 ```bash
@@ -236,13 +284,16 @@ do volume, então `FBX/x.png` não tem barra antes de `FBX`.
 
 ## Imagens: galeria, biblioteca e duplicata visual
 
+A sub-aba **Imagens** do Acervo é a especialista: além da miniatura, ela mede
+dimensão, calcula um hash perceptual e separa o acervo em bibliotecas.
+
 ```bash
 python3 -m diskmap images                      # miniatura + dimensão + hash + biblioteca
 python3 -m diskmap images --reclassify         # só refaz a biblioteca (segundos)
 python3 -m diskmap images --only-cluster --threshold 8
 ```
 
-A aba **Imagens** do painel tem duas visões:
+Ela tem duas visões:
 
 - **Galeria** — grade de miniaturas com filtro por biblioteca, volume, formato, dimensão
   mínima e ordem. Clicar abre o visualizador com caminho, dimensão e as ações.
@@ -278,6 +329,39 @@ depois asset e textura, e por último as regras que só dizem *onde* o arquivo e
 
 Rode `python3 tests/test_classify.py` depois de mexer nelas.
 
+## Etiquetas
+
+Uma etiqueta é a única coisa neste índice que não se recalcula — tudo o mais é
+derivado — então ela é guardada pelo **caminho**, e não pelo id do arquivo: um
+rescan apaga as linhas e o SQLite reaproveita os ids, de modo que qualquer coisa
+guardada por id reaparece pendurada em outro arquivo.
+
+Etiquete uma pasta e vale para tudo que está dentro, inclusive o que entrar
+depois. Na busca e no acervo elas aparecem como balões: clicar filtra, o × tira.
+Uma etiqueta pode viver dentro de outra, e filtrar pela mãe traz as filhas.
+
+Para marcar muita coisa de uma vez há seleção por caixa, com uma barra que
+etiqueta ou desetiqueta o conjunto inteiro — e que lembra, quando você selecionou
+arquivos soltos, que etiquetar a pasta costuma ser a resposta melhor.
+
+## Acervo: o mesmo disco visto por tipo
+
+A aba **Acervo** responde "o que eu tenho?" separado em Imagens, Documentos,
+Vídeos e Outros, cada um com os filtros que fazem sentido — volume, formato,
+ordem, e "só com miniatura".
+
+A miniatura é real sempre que a máquina souber fazê-la: o `qlmanage` do macOS
+renderiza a primeira página de um PDF ou de uma planilha e um quadro dos vídeos
+que o QuickLook abre; o `ffmpeg`, **se estiver instalado**, cobre mkv, avi, wmv,
+flv e webm. O que ninguém sabe renderizar ganha um ícone desenhado em SVG pela
+família da extensão — nada é baixado, e a ferramenta continua funcionando
+offline.
+
+```bash
+python3 -m diskmap acervo --cls video        # ou doc, audio, archive…
+python3 -m diskmap acervo --limit 500        # começa pelos maiores
+```
+
 ## O que ele encontra que um buscador de duplicata não encontra
 
 **Árvores clonadas.** Ferramenta de duplicata acha arquivo repetido. Ela não te diz
@@ -285,6 +369,33 @@ que a pasta de build de um projeto seu e a instalação que o Steam mantém são
 mesma árvore —
 porque isso não é um arquivo, é um padrão entre milhares deles. O `analyze` compara
 árvores por impressão digital (nome + tamanho exato) e reporta o par.
+
+No painel, o número de arquivos iguais é clicável: a seta abre a lista do que
+sustenta o par — nome, tamanho, o caminho de cada lado, a data de cada cópia e o
+veredito de hash de quem já passou pelo `verify`. É a diferença entre "estas duas
+pastas têm 23,6 GB iguais" e "são estes 12 arquivos, e destes, N estão provados".
+
+Com `--allow-actions`, cada linha dessa lista oferece duas ações, e elas fazem
+coisas diferentes: **descartar** manda uma das cópias para a quarentena e libera
+o espaço dela; **sincronizar** faz um lado virar cópia do outro e não libera
+nada — serve para quando as duas divergiram.
+
+Nas duas, o arquivo que sai vai para a quarentena (nada é apagado, e o histórico
+desfaz), caminho de instalação de launcher é recusado, e o aviso muda com a
+prova de hash: igual pede só confirmação, diferente avisa que são versões
+distintas, e sem prova aparece um botão para conferir na hora. Depois da ação o
+painel avisa que o par continua na lista até você reindexar — os achados são
+recalculados, não observados.
+
+Na aba **Duplicatas** o mesmo gesto resolve o grupo inteiro: a seta ao lado do
+número de cópias abre todas elas, com o caminho, a data e o motivo pelo qual cada
+uma é ou não a melhor candidata a ficar. Você escolhe a sobrevivente — o padrão
+já vem da regra que protege instalações de launcher e descarta build e dumps
+primeiro — e um botão manda as outras para a quarentena.
+
+O grupo divergente é recusado: se o hash provou que as cópias têm conteúdo
+diferente, não há redundância para remover. E cópia que sumiu do disco desde a
+última varredura aparece marcada, porque o índice é uma fotografia.
 
 **Compactado com a pasta extraída ao lado.** Um `.7z` de 55 GB ao lado da pasta que
 saiu dele conta duas vezes o mesmo acervo.
@@ -351,6 +462,9 @@ já existe — sem reescanear nada.
 | `actions.py` | ações por caminho; argv declarado em arquivo, alvo validado contra o índice |
 | `jobs.py` | roda os comandos do diskmap como subprocesso, com log, lock e cancelamento |
 | `images.py` | miniatura, dimensão, hash perceptual e biblioteca, via `sips` |
+| `acervo.py` | miniatura do que não é imagem: `qlmanage`, e `ffmpeg` se existir |
+| `tags.py` | etiquetas do usuário; guardadas por caminho, não por id de arquivo |
+| `iowatch.py` | I/O ao vivo por disco e por processo |
 | `userconf.py` | as regras da sua máquina, lidas de `~/.diskmap/rules.json` |
 | `wipe.py` | zero-fill com verificação, e o veredito honesto por volume |
 | `health.py` | SMART por disco físico, cruzado com o que o índice guarda |
@@ -358,6 +472,11 @@ já existe — sem reescanear nada.
 | `tests/test_blobs.py` | fixa o veredito de pasta agregada: `.git` nunca sai |
 | `tests/test_wipe.py` | fixa as recusas do zerar (hard link, symlink, pasta) |
 | `tests/test_health.py` | fixa a leitura do smartctl com saída real |
+| `tests/test_tags.py` | fixa que a etiqueta sobrevive a um rescan |
+| `tests/test_acervo.py` | fixa qual renderizador atende cada formato |
+| `tests/test_overlap.py` | fixa que a lista de um par bate com a contagem dele |
+| `tests/test_resolve_clone.py` | fixa as travas da única escrita que substitui arquivo |
+| `tests/test_iowatch.py` | fixa a leitura dos contadores de I/O |
 | `web/` | front: HTML, CSS e um `app.js` sem build |
 
 ## Notas

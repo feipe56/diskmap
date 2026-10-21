@@ -58,6 +58,24 @@ SPLICE_CASES = [
 ]
 
 
+def quarentena_ignorada():
+    """A quarentena tem de ser invisível para o scanner.
+
+    Sem isso, mandar uma cópia para a quarentena e reindexar faz o par voltar a
+    aparecer como duplicata — agora apontando para dentro da quarentena. A
+    desduplicação ficaria invisível para a própria ferramenta que a fez.
+
+    O nome é literal nos dois lados (`classify` não pode importar `actions`, que
+    importa `classify`), então o teste existe para que eles não divirjam.
+    """
+    from diskmap.actions import QUAR_NAME
+    from diskmap.classify import SKIP_DIRS
+    if QUAR_NAME in SKIP_DIRS:
+        return []
+    return [("SKIP_DIRS", f"contém {QUAR_NAME}",
+             "não contém: o scanner indexaria o que está saindo do disco")]
+
+
 def main():
     bad = []
     for relpath, name, ext, want in CASES:
@@ -74,6 +92,9 @@ def main():
         got = classify(relpath, name, ext, BUILTIN)
         if got != want_builtin:
             bad.append((f"[só built-in] {relpath}/{name}", want_builtin, got))
+
+    n += 1
+    bad += quarentena_ignorada()
 
     # the live list must still be buildable - a broken rules.json must not
     # take classification down with it

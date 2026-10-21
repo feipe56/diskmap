@@ -496,19 +496,31 @@ def cluster(con, threshold=10, progress=True):
     return kept
 
 
-def stats(con):
+def stats(con, filtro="", fargs=()):
+    """Library counts and totals. `filtro` narrows them to a subset.
+
+    The caller passes a ready SQL fragment because the only caller that needs
+    one is the tag filter, and `images` has no business knowing what a tag is.
+    What it does need to know: a summary that ignores the active filter is a
+    summary that contradicts the grid right under it.
+    """
     con.executescript(SCHEMA)
     out = {"libs": [], "total": 0, "bytes": 0, "with_hash": 0, "no_thumb": 0}
+    extra = (" AND " + filtro) if filtro else ""
+    junta = (" JOIN dirs d ON d.id=f.dir JOIN volumes v ON v.id=f.vol"
+             if filtro else "")
     for r in con.execute(
             "SELECT m.lib, COUNT(*) n, SUM(f.size) b, "
             "SUM(CASE WHEN m.thumb IS NOT NULL THEN 1 ELSE 0 END) t "
-            "FROM image_meta m JOIN files f ON f.id=m.file GROUP BY m.lib ORDER BY b DESC"):
+            "FROM image_meta m JOIN files f ON f.id=m.file" + junta +
+            " WHERE 1" + extra + " GROUP BY m.lib ORDER BY b DESC", list(fargs)):
         out["libs"].append({"lib": r["lib"], "label": LIB_LABEL.get(r["lib"], r["lib"]),
                             "n": r["n"], "bytes": r["b"] or 0, "thumbs": r["t"]})
     r = con.execute("SELECT COUNT(*) n, SUM(f.size) b, "
                     "SUM(CASE WHEN m.dhash IS NOT NULL THEN 1 ELSE 0 END) hh, "
                     "SUM(CASE WHEN m.thumb IS NULL THEN 1 ELSE 0 END) nt "
-                    "FROM image_meta m JOIN files f ON f.id=m.file").fetchone()
+                    "FROM image_meta m JOIN files f ON f.id=m.file" + junta +
+                    " WHERE 1" + extra, list(fargs)).fetchone()
     out.update(total=r["n"] or 0, bytes=r["b"] or 0,
                with_hash=r["hh"] or 0, no_thumb=r["nt"] or 0)
     g = con.execute("SELECT COUNT(*) n, SUM(wasted) w FROM img_groups").fetchone()

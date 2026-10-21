@@ -83,7 +83,25 @@ const absDir = (r) => { const m = mountOf(r.label); return m ? joinp(m, r.relpat
 const absRel = (label, rel) => { const m = mountOf(label); return m ? joinp(m, rel) : null; };
 
 /* ---------- actions ---------- */
-const TOKEN = window.DISKMAP_TOKEN || null;
+let TOKEN = window.DISKMAP_TOKEN || null;
+
+/* O token nasce a cada start do servidor e é capturado uma vez, no carregamento
+   da página. Reinicie o servidor e toda aba aberta passa a mandar um token
+   morto: "token invalido" em tudo que escreve, sem pista do motivo.
+
+   Buscar o token de novo é seguro porque a busca é na MESMA origem: o
+   `_origin_ok` do servidor já recusa qualquer outra, e uma página de fora não
+   consegue ler a resposta de um fetch cross-origin. O token continua sendo a
+   segunda barreira que ele sempre foi — ele só deixa de exigir um F5 manual
+   quando a primeira ainda está de pé. */
+async function renovaToken() {
+  const r = await fetch('/', { cache: 'no-store' });
+  const txt = await r.text();
+  const m = txt.match(/window\.DISKMAP_TOKEN\s*=\s*"([^"]+)"/);
+  if (!m) throw new Error('o servidor não devolveu um token novo');
+  TOKEN = m[1];
+  return TOKEN;
+}
 const ACTIONS_ON = !!window.DISKMAP_ACTIONS;
 let ACTS = [];
 
@@ -96,14 +114,22 @@ function toast(msg, kind) {
   setTimeout(() => t.remove(), kind === 'err' ? 9000 : 5000);
 }
 
-const post = async (path, body) => {
+const post = async (path, body, _retry) => {
   const r = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Diskmap-Token': TOKEN || '' },
     body: JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-  if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+  if (!r.ok || j.error) {
+    // Uma vez só: se o token morreu porque o servidor reiniciou, pega o novo e
+    // repete. Duas vezes seria laço quando a recusa for por outro motivo.
+    if (!_retry && /token/i.test(j.error || '')) {
+      try { await renovaToken(); } catch (e) { throw new Error(j.error); }
+      return post(path, body, true);
+    }
+    throw new Error(j.error || `HTTP ${r.status}`);
+  }
   return j;
 };
 
@@ -143,28 +169,49 @@ async function confirmWipe(a, path) {
     return;
   }
   const [cls, title] = WIPE_LEVEL[w.level] || ['crit', w.level];
-  const blocked = !w.allowed || (w.refusals || []).length;
+  const refusals = w.refusals || [];
+  const blocked = !w.allowed || refusals.length;
   const facts = [`${esc(w.fs)}`,
     w.rotational === true ? 'disco mecânico' : w.rotational === false ? 'memória flash' : null,
     w.snapshots ? `${N(w.snapshots)} snapshots` : null,
     w.read_only ? 'montado somente-leitura' : null].filter(Boolean).join(' · ');
+  const head = `<h3>${esc(a.name)}</h3><div class="sheet-path">${esc(path)}</div>`;
+  const facha = `<p class="note">${esc(w.label)} · ${facts}${
+    w.size != null ? ` · ${H(w.size)}` : ''}</p>`;
+
+  /* Quando não dá para zerar, a recusa é a manchete e o veredito do volume
+     desce para rodapé: ele responde "quanto isso vale aqui", e essa pergunta
+     nem chega a existir. Antes a ordem era a inversa e a tela parecia um
+     diálogo de confirmação a que faltava o botão. */
+  if (blocked) {
+    const pasta = refusals.some((r) => r.indexOf('pasta') >= 0);
+    sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true">
+      ${head}
+      <div class="warnbox crit"><b>Não dá para zerar isto.</b><br>
+        ${refusals.length ? refusals.map(esc).join('<br>') : esc(w.why)}</div>
+      ${pasta ? `<p class="note">Zerar sobrescreve byte a byte, então só alcança
+        arquivo. Para a pasta inteira, use <b>Mover para a Lixeira</b> ou
+        <b>Mover para quarentena</b> — as duas têm volta.</p>` : ''}
+      ${facha}
+      <div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>
+    </div>`;
+    sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+    return;
+  }
 
   sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true">
-    <h3>${esc(a.name)}</h3>
-    <div class="sheet-path">${esc(path)}</div>
+    ${head}
     <div class="warnbox ${cls}"><b>${esc(title)}.</b> ${esc(w.why)}</div>
-    <p class="note">${esc(w.label)} · ${facts}${
-      w.size != null ? ` · ${H(w.size)}` : ''}</p>
-    ${(w.refusals || []).length
-      ? `<div class="warnbox crit">${w.refusals.map(esc).join('<br>')}</div>` : ''}
-    ${blocked ? '' : `<div class="warnbox crit"><b>Isto não tem undo.</b>
+    ${facha}
+    <div class="warnbox crit"><b>Isto não tem undo.</b>
       Sobrescreve cada byte com zero, confere a leitura e apaga o arquivo.
       A aba Histórico vai registrar, mas não vai conseguir desfazer.</div>
-      <p class="note">Para confirmar, digite <b>ZERAR</b>:</p>
-      <input id="wipe-ok" class="searchbox" autocomplete="off" spellcheck="false">`}
+    <p class="note">Para confirmar, digite <b>ZERAR</b>:</p>
+    <input id="wipe-ok" type="text" class="textin" autocomplete="off" spellcheck="false"
+           placeholder="ZERAR">
     <div class="sheet-foot">
       <button class="btn" data-close>Cancelar</button>
-      ${blocked ? '' : '<button class="btn danger" data-go disabled>Zerar e apagar</button>'}
+      <button class="btn danger" data-go disabled>Zerar e apagar</button>
     </div></div>`;
   sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
   if (blocked) return;
@@ -193,6 +240,7 @@ function openActions(path) {
     <div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>
   </div>`;
   sheet().hidden = false;
+  editorDeTags(path);
   sheet().querySelectorAll('[data-run]').forEach((b) => {
     b.addEventListener('click', () => {
       const a = ACTS.find((x) => x.id === b.dataset.run);
@@ -203,6 +251,69 @@ function openActions(path) {
     });
   });
   sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+}
+
+/* O editor de etiquetas mora dentro da folha de ações porque é lá que já está
+   o caminho em questão. Ele se desenha depois, sozinho: as etiquetas vêm de
+   outra consulta e a folha não deve esperar por ela para abrir. */
+async function editorDeTags(path) {
+  const caixa = document.createElement('div');
+  caixa.className = 'tagbox';
+  caixa.innerHTML = '<div class="empty">etiquetas…</div>';
+  const alvo = sheet().querySelector('.sheet-in');
+  if (!alvo) return;
+  alvo.insertBefore(caixa, alvo.querySelector('.sheet-foot'));
+  await carregaTags();
+  let minhas = [];
+  try { minhas = (await api('/api/path-tags?path=' + encodeURIComponent(path))).tags || []; }
+  catch (_) { minhas = []; }
+  const pinta = () => {
+    caixa.innerHTML = `<div class="tagtit">etiquetas</div>
+      <div class="chips">
+        ${minhas.map((t) => `<span class="chip on${t.herdada ? ' herd' : ''}"
+          title="${t.herdada ? 'vem da pasta ' + esc(t.de) : 'nesta própria coisa'}"
+          >${esc(t.name)}${t.herdada ? '' :
+            `<button data-tagoff="${esc(t.name)}" aria-label="tirar ${esc(t.name)}">×</button>`}
+          </span>`).join('') || '<span class="cart-meta">nenhuma ainda</span>'}
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input class="textin" id="tagnova" list="taglist" placeholder="nova etiqueta…"
+          maxlength="48" style="flex:1">
+        <datalist id="taglist">${TAGS.map((t) =>
+          `<option value="${esc(t.name)}">`).join('')}</datalist>
+        <select id="tagpai" title="dentro de qual etiqueta">
+          <option value="">solta</option>
+          ${TAGS.filter((t) => !t.parent).map((t) =>
+            `<option value="${esc(t.name)}">dentro de ${esc(t.name)}</option>`).join('')}
+        </select>
+        <button class="btn" data-tagadd>adicionar</button>
+      </div>
+      <p class="cart-meta" style="margin-top:6px">Etiqueta em pasta vale para
+        tudo que está dentro, inclusive o que entrar depois.</p>`;
+    caixa.querySelectorAll('[data-tagoff]').forEach((b) =>
+      b.addEventListener('click', () => mexe('remove', b.dataset.tagoff)));
+    const add = caixa.querySelector('[data-tagadd]');
+    const inp = caixa.querySelector('#tagnova');
+    const sel = caixa.querySelector('#tagpai');
+    const manda = () => {
+      const v = (inp.value || '').trim();
+      if (v) mexe('add', v, sel && sel.value ? sel.value : null);
+    };
+    add.addEventListener('click', manda);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') manda(); });
+  };
+  const mexe = async (acao, name, pai) => {
+    caixa.innerHTML = '<div class="empty">gravando…</div>';
+    try {
+      await post('/api/tag', { acao, name, path, pai });
+      await carregaTags();
+      minhas = (await api('/api/path-tags?path=' + encodeURIComponent(path))).tags || [];
+      toast(acao === 'add' ? `etiquetado: ${name}` : `tirado: ${name}`, 'ok');
+      loaded.busca = false;
+    } catch (e) { toast(e.message, 'err'); }
+    pinta();
+  };
+  pinta();
 }
 
 function confirmAction(a, path) {
@@ -333,7 +444,22 @@ const CMDS = [
     ],
     go: 'Verificar',
   },
-  {
+    {
+    kind: 'acervo', title: 'Gerar miniaturas do acervo', cid: 'acervo',
+    desc: 'Vídeo, documento e afins. Usa o qlmanage do macOS, e o ffmpeg quando '
+      + 'ele existe, para os formatos de vídeo que o QuickLook não abre. '
+      + 'Deixe a classe em branco para processar todas.',
+    fields: [
+      { k: 'cls', label: 'classe', type: 'select',
+        opts: [['video', 'vídeos'], ['doc', 'documentos'], ['audio', 'áudio'],
+               ['archive', 'compactados'], ['', 'todas que não são imagem']] },
+      { k: 'limit', label: 'quantos arquivos no máximo', type: 'number', def: 500,
+        min: 1, hint: 'começa pelos maiores' },
+      { k: 'refresh', label: 'refazer o que já foi tentado', type: 'check' },
+    ],
+    go: 'Gerar',
+  },
+{
     kind: 'images', title: 'Processar imagens', cid: 'images',
     desc: 'Gera miniatura, dimensão e hash visual, e classifica cada imagem numa '
       + 'biblioteca. Usa o sips do macOS — ~26 ms por imagem com 8 processos.',
@@ -529,6 +655,10 @@ async function panelTarefas() {
 let IMG_OV = null;
 let IMG_F = { lib: 'all', vol: 'all', format: 'all', sort: 'size', minpx: 0, q: '' };
 let IMG_PAGE = 0;
+/* Quantas imagens EXISTEM sob o filtro, processadas ou não. A galeria só mostra
+   as que têm miniatura, então sem este número a sub-aba diz 80 e a grade diz 0 —
+   os dois certos, e a tela sem explicar a diferença. */
+let ACV_CONT = null;
 let IMG_ROWS = [];        // what the grid currently shows, for the viewer
 let IMG_MODE = 'galeria'; // galeria | repetidas
 
@@ -538,7 +668,9 @@ const imgAbs = (r) => (r.mount ? joinp(r.mount.replace(/\/$/, ''), r.relpath, r.
 
 function shot(r) {
   const px = (r.width && r.height) ? `${r.width}×${r.height}` : '';
-  return `<figure class="sh" data-img="${r.id}">
+  const abs = imgAbs(r);
+  return `<figure class="sh${SEL.has(abs) ? ' sel' : ''}" data-img="${r.id}">
+    ${selCheck(abs)}
     <div class="box"><img src="${thumb(r.id)}" alt="${esc(r.name)}" loading="lazy" decoding="async">
       ${px ? `<span class="px">${px}</span>` : ''}</div>
     <figcaption><div class="nm" title="${esc(r.name)}">${esc(r.name)}</div>
@@ -574,23 +706,45 @@ async function renderGrid() {
     lib: IMG_F.lib, vol: IMG_F.vol, format: IMG_F.format, sort: IMG_F.sort,
     minpx: String(IMG_F.minpx), q: IMG_F.q, limit: '120', offset: String(IMG_PAGE * 120),
   });
+  // A galeria é fonte própria: a etiqueta tem de ir junto, senão o cabeçalho
+  // diz "Imagens 0" e a grade mostra o acervo inteiro logo abaixo.
+  [...TAGS_ON].forEach((n) => p.append('tag', n));
   const d = await api('/api/images?' + p);
   IMG_ROWS = d.images;
   el('imgcount').textContent =
     `${N(d.total)} imagens · ${H(d.bytes)}` + (d.total > 120 ? ` · página ${IMG_PAGE + 1}` : '');
   const g = el('grid');
+  const existem = ACV_CONT ? (ACV_CONT.imagem || 0) : 0;
   g.innerHTML = d.images.length ? d.images.map(shot).join('')
-    : '<div class="empty">nenhuma imagem com esse filtro</div>';
+    : (TAGS_ON.size && existem)
+      ? `<div class="empty">A galeria mostra só o que tem miniatura, e aqui não
+         há nenhuma.<br><br>Sob ${TAGS_ON.size > 1 ? 'estas etiquetas' : 'esta etiqueta'}
+         existem <b>${N(existem)}</b> imagens no índice${IMG_OV
+           ? `, ${N(IMG_OV.total)} processada(s)${IMG_OV.no_thumb
+             ? ` e ${N(IMG_OV.no_thumb)} sem miniatura` : ''}` : ''}.<br><br>
+         <code>python3 -m diskmap images</code> ou a aba Tarefas.</div>`
+      : '<div class="empty">nenhuma imagem com esse filtro</div>';
   el('imgprev').hidden = IMG_PAGE === 0;
   el('imgnext').hidden = (IMG_PAGE + 1) * 120 >= d.total;
+  // A galeria é redesenhada a cada página e a cada filtro, então a seleção é
+  // religada aqui e não uma vez só no painel.
+  const painel = g.closest('.panel') || document;
+  ligaSelecao(painel, () => renderGrid());
+  sincronizaBarra(painel, () => renderGrid());
 }
 
 async function renderClusters() {
-  const d = await api('/api/img-groups?limit=25');
+  const gp = new URLSearchParams({ limit: '25' });
+  [...TAGS_ON].forEach((n) => gp.append('tag', n));
+  const d = await api('/api/img-groups?' + gp);
   const box = el('clusters');
   el('imgcount').textContent =
     `${N(d.count)} grupos parecidos · ${H(d.wasted)} se mantiver só a maior de cada`;
-  if (!d.groups.length) {
+  if (!d.groups.length && TAGS_ON.size) {
+    box.innerHTML = `<div class="empty">nenhum grupo de imagens parecidas sob
+      ${TAGS_ON.size > 1 ? 'estas etiquetas' : 'esta etiqueta'}. Os grupos saem
+      do hash visual, que só existe para imagem já processada.</div>`;
+  } else if (!d.groups.length) {
     box.innerHTML = `<div class="empty">nenhum grupo visual ainda.<br><br>
       Rode <code>diskmap images</code> (ou a aba Tarefas) para gerar os hashes.</div>`;
     return;
@@ -623,10 +777,17 @@ async function renderClusters() {
   });
 }
 
-async function panelImagens() {
-  const target = el('p-imagens');
-  if (!IMG_OV) {
-    try { IMG_OV = await api('/api/img-overview'); } catch (_) { IMG_OV = null; }
+async function panelImagens(target) {
+  // Refeito a cada chamada quando há etiqueta: o resumo é por filtro, e um
+  // resumo cacheado do acervo inteiro contradiz a grade logo abaixo dele.
+  const chaveTags = [...TAGS_ON].sort().join('|');
+  if (!IMG_OV || IMG_OV._tags !== chaveTags) {
+    const p = new URLSearchParams();
+    [...TAGS_ON].forEach((n) => p.append('tag', n));
+    try {
+      IMG_OV = await api('/api/img-overview' + (String(p) ? '?' + p : ''));
+      IMG_OV._tags = chaveTags;
+    } catch (_) { IMG_OV = null; }
   }
   if (!IMG_OV || !IMG_OV.total) {
     target.innerHTML = `<div class="phead"><p class="eyebrow">visual</p><h2>Imagens</h2></div>
@@ -672,7 +833,9 @@ async function panelImagens() {
     </select>
     <span class="count" id="imgcount"></span></div>`;
 
-  h += `<div id="grid" class="grid"${IMG_MODE !== 'galeria' ? ' hidden' : ''}></div>
+  h += `<div class="row" style="margin:10px 0"${IMG_MODE !== 'galeria' ? ' hidden' : ''}>
+      <button class="btn" data-seltodos>marcar/desmarcar os desta página</button></div>
+    <div id="grid" class="grid"${IMG_MODE !== 'galeria' ? ' hidden' : ''}></div>
     <div id="clusters"${IMG_MODE !== 'repetidas' ? ' hidden' : ''}></div>
     <div class="gridbar" style="margin-top:16px">
       <button class="btn" id="imgprev" hidden>← anteriores</button>
@@ -694,7 +857,7 @@ async function panelImagens() {
     });
   });
   target.querySelectorAll('[data-mode]').forEach((b) => {
-    b.addEventListener('click', () => { IMG_MODE = b.dataset.mode; panelImagens(); });
+    b.addEventListener('click', () => { IMG_MODE = b.dataset.mode; panelImagens(target); });
   });
   const bind = (id, key, num) => {
     const s = el(id);
@@ -945,22 +1108,521 @@ async function loadBlobs() {
         tdn(when(r)), tdn(esc(r.proof || '—')), actCell(r.path)]));
 }
 
+/* The pair rows of the trees tab, so an expanded row can find its pair by
+   index, plus a cache: reopening a row must not re-query the index. */
+let OVL = [];
+const OVL_CACHE = {};
+
+/* The arrow lives next to the file count because the count is the claim and the
+   files are the evidence -- clicking the number is the natural way to ask "which
+   ones?". aria-expanded carries the state, so the CSS rotation and the screen
+   reader read from the same place. */
+const twigCell = (n, i) => `<td class="num twigcell">
+  <button class="twig" data-twig="${i}" aria-expanded="false"
+    title="ver os arquivos iguais">${N(n)}<span class="arrow" aria-hidden="true">▸</span>
+  </button></td>`;
+
+function twigBody(d, i) {
+  if (d.erro) return `<div class="empty">${esc(d.erro)}</div>`;
+  if (!d.rows || !d.rows.length) {
+    return `<div class="empty">nenhum arquivo acima do piso de impressão digital</div>`;
+  }
+  const mes = (m) => (m ? new Date(m * 1000).toISOString().slice(0, 7) : '—');
+  const mais = (n) => (n > 0
+    ? ` <span class="tag">+${N(n)} na mesma árvore</span>` : '');
+  const corte = d.shown < d.total
+    ? `<p class="note">Mostrando os ${N(d.shown)} maiores de ${N(d.total)}.</p>` : '';
+  const cols = ['Arquivo', 'Tamanho', 'Prova', `em ${esc(d.a_label)}`, 'quando',
+    `em ${esc(d.b_label)}`, 'quando'];
+  if (ACTIONS_ON) cols.push('');
+  return `<div class="twigbox">
+    <p class="note">${N(d.total)} arquivos com o mesmo nome e o mesmo tamanho nas
+      duas árvores, somando <b>${H(d.bytes)}</b>. A coluna <b>prova</b> é só o que o
+      <code>verify</code> já conferiu por hash — sem ela, nome e tamanho é
+      candidato, não prova.</p>${corte}
+    ${ACTIONS_ON ? `<p class="note"><b>descartar</b> tira uma das cópias do
+      caminho e libera o espaço dela; <b>sincronizar</b> faz um lado virar cópia
+      do outro e não libera nada — serve para quando os dois divergiram. As duas
+      mandam o arquivo que sai para a quarentena, e o Histórico desfaz.</p>` : ''}
+    ${table(cols, d.rows.map((x, j) => {
+      const linha = [
+        `<td class="path"><span class="hi">${esc(x.name)}</span></td>`,
+        tdn(H(x.size)), tdn(VER_TAG[x.verdict] || VER_TAG.no),
+        `<td class="path">${esc(x.a_path)}${mais(x.a_extra)}</td>`,
+        tdn(mes(x.mtime_a)),
+        `<td class="path">${esc(x.b_path)}${mais(x.b_extra)}</td>`,
+        tdn(mes(x.mtime_b))];
+      if (ACTIONS_ON) {
+        // Dois verbos porque são duas operações diferentes, e confundi-las é
+        // caro: sincronizar iguala os dois lados e não libera nada; descartar
+        // tira um do caminho e libera o tamanho dele.
+        linha.push(`<td class="act">
+          <button class="actbtn" data-descartar="${i}:${j}">descartar</button>
+          <button class="actbtn" data-resolve="${i}:${j}">sincronizar</button></td>`);
+      }
+      return linha;
+    }))}
+  </div>`;
+}
+
+/* Resolver o clone: fazer um lado virar cópia do outro.
+   É a única escrita do diskmap que substitui arquivo existente, então a folha
+   tem de dizer exatamente o que vai acontecer ANTES, e a prova de hash decide
+   o tom: prova de igualdade vira confirmação simples, prova de diferença vira
+   alarme, e ausência de prova vira um convite a conferir em vez de adivinhar. */
+let RESOLVE = null;
+
+function resolveSheet() {
+  const { d, x, dir } = RESOLVE;
+  const srcLab = dir === 'a2b' ? d.a_label : d.b_label;
+  const dstLab = dir === 'a2b' ? d.b_label : d.a_label;
+  const srcRel = dir === 'a2b' ? x.a_path : x.b_path;
+  const dstRel = dir === 'a2b' ? x.b_path : x.a_path;
+  const src = absRel(srcLab, srcRel);
+  const dst = absRel(dstLab, dstRel);
+  const v = x.verdict;
+  const caixa = v === 'full'
+    ? `<div class="warnbox ok"><b>sha256 idêntico nos dois.</b> Os arquivos já são o
+       mesmo conteúdo, então substituir não muda byte nenhum — serve só para
+       deixar os dois com a mesma data. Confirme se é isso que você quer.</div>`
+    : v === 'mismatch'
+      ? `<div class="warnbox crit"><b>Os dois NÃO são o mesmo arquivo.</b> Mesmo
+         nome e mesmo tamanho, sha256 diferente — são versões distintas. Substituir
+         destrói uma delas (ela vai para a quarentena, mas some do lugar).
+         <b>Só siga se você sabe qual das duas quer manter.</b></div>`
+      : `<div class="warnbox warn"><b>Ninguém comparou o conteúdo destes dois.</b>
+         Mesmo nome e mesmo tamanho é candidato, não prova — arquivos de formato
+         fixo (modelos, imagens de disco, contêineres) batem em nome e tamanho
+         sem terem o mesmo conteúdo. Confira antes de substituir.</div>`;
+  const semMontar = !src || !dst;
+  sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true"
+      aria-label="Resolver clone">
+    <h3>Resolver clone · ${esc(x.name)}</h3>
+    ${caixa}
+    <div class="dirpick">
+      <button class="dirbtn${dir === 'a2b' ? ' on' : ''}" data-dir="a2b">
+        <span class="an">${esc(d.a_label)} → ${esc(d.b_label)}</span>
+        <span class="ah">substitui o de ${esc(d.b_label)}</span></button>
+      <button class="dirbtn${dir === 'b2a' ? ' on' : ''}" data-dir="b2a">
+        <span class="an">${esc(d.b_label)} → ${esc(d.a_label)}</span>
+        <span class="ah">substitui o de ${esc(d.a_label)}</span></button>
+    </div>
+    <div class="sheet-path"><b>mantém</b> ${esc(src || (srcLab + '/' + srcRel))}</div>
+    <div class="sheet-path"><b>substitui</b> ${esc(dst || (dstLab + '/' + dstRel))}</div>
+    ${semMontar ? `<div class="warnbox crit">Um dos volumes não está montado:
+      não dá para agir sobre ele.</div>` : `<div class="warnbox">O arquivo
+      substituído vai para <code>.diskmap-quarantine</code> no volume dele, e a
+      aba <b>Histórico</b> desfaz. A cópia nova é relida do disco e só entra no
+      lugar se o sha256 bater com a origem.</div>`}
+    <div class="sheet-foot">
+      <button class="btn" data-close>Cancelar</button>
+      ${v === 'full' || v === 'mismatch' ? '' :
+        '<button class="btn" data-check>Conferir agora (sha256)</button>'}
+      <button class="btn danger" data-go ${semMontar ? 'disabled' : ''}>Substituir</button>
+    </div></div>`;
+  sheet().hidden = false;
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+  sheet().querySelectorAll('[data-dir]').forEach((b) => b.addEventListener('click', () => {
+    RESOLVE.dir = b.dataset.dir;
+    resolveSheet();
+  }));
+  const chk = sheet().querySelector('[data-check]');
+  if (chk) chk.addEventListener('click', () => conferirPar(src, dst));
+  const go = sheet().querySelector('[data-go]');
+  if (go && !semMontar) go.addEventListener('click', () => runResolve(src, dst));
+}
+
+/* Descartar: a operação que de fato tira a redundância. O portão de prova é o
+   mesmo da sincronização, mas as consequências se invertem — aqui a prova de
+   IGUALDADE é que libera a ação, porque descartar um de dois arquivos idênticos
+   não perde conteúdo, e descartar um de dois DIFERENTES perde. */
+function descarteSheet() {
+  const { d, x, lado } = RESOLVE;
+  const lab = lado === 'a' ? d.a_label : d.b_label;
+  const outro = lado === 'a' ? d.b_label : d.a_label;
+  const rel = lado === 'a' ? x.a_path : x.b_path;
+  const relOutro = lado === 'a' ? x.b_path : x.a_path;
+  const alvo = absRel(lab, rel);
+  const fica = absRel(outro, relOutro);
+  const v = x.verdict;
+  const caixa = v === 'full'
+    ? `<div class="warnbox ok"><b>sha256 idêntico nos dois.</b> Descartar este
+       libera <b>${H(x.size)}</b> e não perde conteúdo nenhum: a cópia que fica
+       é byte a byte a mesma.</div>`
+    : v === 'mismatch'
+      ? `<div class="warnbox crit"><b>Os dois NÃO são o mesmo arquivo.</b> sha256
+         diferente — são versões distintas, e o conteúdo deste não existe do
+         outro lado. Descartar aqui <b>perde</b> essa versão (ela fica na
+         quarentena, mas sai do lugar).</div>`
+      : `<div class="warnbox warn"><b>Ninguém comparou o conteúdo destes dois.</b>
+         Descartar sem prova é apostar que são iguais. Confira primeiro.</div>`;
+  const semMontar = !alvo || !fica;
+  sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true"
+      aria-label="Descartar cópia">
+    <h3>Descartar cópia · ${esc(x.name)}</h3>
+    ${caixa}
+    <div class="dirpick">
+      <button class="dirbtn${lado === 'a' ? ' on' : ''}" data-lado="a">
+        <span class="an">descartar o de ${esc(d.a_label)}</span>
+        <span class="ah">fica o de ${esc(d.b_label)}</span></button>
+      <button class="dirbtn${lado === 'b' ? ' on' : ''}" data-lado="b">
+        <span class="an">descartar o de ${esc(d.b_label)}</span>
+        <span class="ah">fica o de ${esc(d.a_label)}</span></button>
+    </div>
+    <div class="sheet-path"><b>sai</b> ${esc(alvo || (lab + '/' + rel))}</div>
+    <div class="sheet-path"><b>fica</b> ${esc(fica || (outro + '/' + relOutro))}</div>
+    ${semMontar ? `<div class="warnbox crit">Um dos volumes não está montado.</div>`
+      : `<div class="warnbox">Vai para <code>.diskmap-quarantine</code> no mesmo
+         volume, com o caminho original preservado dentro. O Histórico desfaz, e
+         nada é apagado: o espaço só volta quando você esvaziar a quarentena à
+         mão.</div>`}
+    <div class="sheet-foot">
+      <button class="btn" data-close>Cancelar</button>
+      ${v === 'full' || v === 'mismatch' ? '' :
+        '<button class="btn" data-check>Conferir agora (sha256)</button>'}
+      <button class="btn danger" data-go ${semMontar ? 'disabled' : ''}>Descartar</button>
+    </div></div>`;
+  sheet().hidden = false;
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+  sheet().querySelectorAll('[data-lado]').forEach((b) =>
+    b.addEventListener('click', () => { RESOLVE.lado = b.dataset.lado; descarteSheet(); }));
+  const chk = sheet().querySelector('[data-check]');
+  if (chk) chk.addEventListener('click', () => conferirPar(alvo, fica, descarteSheet));
+  const go = sheet().querySelector('[data-go]');
+  if (go && !semMontar) go.addEventListener('click', () => runDescarte(alvo, fica));
+}
+
+async function runDescarte(alvo, fica) {
+  const nome = RESOLVE.x.name;
+  const tam = RESOLVE.x.size;
+  sheet().innerHTML = `<div class="sheet-in"><h3>Descartar · ${esc(nome)}</h3>
+    <pre class="out">movendo para a quarentena…</pre></div>`;
+  const foot = '<div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>';
+  try {
+    // `keep` não é decoração: o servidor confere no disco que essa cópia está
+    // lá antes de mover a outra, para o último clique nunca deixar zero.
+    const res = await post('/api/discard-clone',
+      { path: alvo, keep: fica, expect: (RESOLVE.shas || {})[alvo] || null });
+    sheet().innerHTML = `<div class="sheet-in"><h3>Descartar · ${esc(nome)}</h3>
+      <div class="sheet-path">${esc(res.path)}</div>
+      <pre class="out">${esc(res.output)}</pre>
+      <div class="warnbox ok">A cópia que fica foi conferida no disco antes de
+        mover: <code>${esc(res.kept)}</code></div>${reindexNota()}${foot}</div>`;
+    toast(`descartado · ${H(tam)} na quarentena`, 'ok');
+    loaded.historico = false; loaded.arvores = false; loaded.resumo = false;
+  } catch (e) {
+    sheet().innerHTML = `<div class="sheet-in"><h3>Descartar · ${esc(nome)}</h3>
+      <div class="warnbox crit">${esc(e.message)}</div>${foot}</div>`;
+    toast(e.message, 'err');
+  }
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+}
+
+/* Os achados são derivados: `dup_groups` e `tree_overlap` são reconstruídos pelo
+   analyze, que lê a tabela `files`, que só o scan atualiza. Enquanto os dois não
+   rodarem, o painel continua mostrando o par que você acabou de resolver — e um
+   painel que mente sobre o próprio trabalho é pior que um painel desatualizado
+   em silêncio. Então ele diz. */
+function reindexNota() {
+  return `<div class="warnbox"><b>O painel ainda vai mostrar este par.</b> Os
+    achados são recalculados, não observados: rode <b>Indexar um volume</b> nos
+    dois volumes e depois <b>Recalcular achados</b>, na aba Tarefas, para a lista
+    refletir o que você acabou de fazer.</div>`;
+}
+
+async function conferirPar(src, dst, redesenha) {
+  const foot = sheet().querySelector('.sheet-foot');
+  foot.innerHTML = '<pre class="out">lendo os dois arquivos do disco…</pre>';
+  try {
+    const r = await post('/api/compare-hash', { a: src, b: dst });
+    RESOLVE.x.verdict = r.equal ? 'full' : 'mismatch';
+    // Guardado por caminho absoluto, não por lado: o usuário pode inverter a
+    // direção depois de conferir, e aí 'a' e 'b' trocam de papel.
+    RESOLVE.shas = Object.assign(RESOLVE.shas || {},
+      { [r.a.path]: r.a.sha, [r.b.path]: r.b.sha });
+    toast(r.equal ? 'sha256 igual: são o mesmo arquivo'
+      : 'sha256 diferente: NÃO são o mesmo arquivo', r.equal ? 'ok' : 'err');
+    loaded.arvores = false;        // a coluna prova mudou
+    (redesenha || resolveSheet)();
+  } catch (e) {
+    foot.innerHTML = `<div class="warnbox crit">${esc(e.message)}</div>
+      <button class="btn" data-close>Fechar</button>`;
+    foot.querySelector('[data-close]').addEventListener('click', closeSheet);
+  }
+}
+
+async function runResolve(src, dst) {
+  const nome = RESOLVE.x.name;
+  sheet().innerHTML = `<div class="sheet-in"><h3>Resolver clone · ${esc(nome)}</h3>
+    <pre class="out">copiando e conferindo…</pre></div>`;
+  const foot = '<div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>';
+  try {
+    // `expect` só vai quando foi realmente medido: ele faz o servidor recusar
+    // se a origem mudou desde a leitura. Mandar um palpite ali seria pior que
+    // não mandar nada.
+    const res = await post('/api/resolve-clone',
+      { src, dst, expect: (RESOLVE.shas || {})[src] || null });
+    sheet().innerHTML = `<div class="sheet-in"><h3>Resolver clone · ${esc(nome)}</h3>
+      <div class="sheet-path">${esc(res.path)}</div>
+      <pre class="out">${esc(res.output)}</pre>${reindexNota()}${foot}</div>`;
+    toast('cópias sincronizadas', 'ok');
+    loaded.historico = false; loaded.arvores = false; loaded.resumo = false;
+  } catch (e) {
+    sheet().innerHTML = `<div class="sheet-in"><h3>Resolver clone · ${esc(nome)}</h3>
+      <div class="warnbox crit">${esc(e.message)}</div>${foot}</div>`;
+    toast(e.message, 'err');
+  }
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+}
+
+/* No per-file action button here on purpose. Both sides of a pair are
+   candidates and the panel cannot say which one should survive -- offering a
+   destructive action next to an unproven pair is exactly the mistake the
+   launcher protection and the sha256 verdict exist to prevent. Inspect here,
+   act from Liberar or Duplicatas, where a verdict exists. */
+async function toggleTwig(b) {
+  const tr = b.closest('tr');
+  if (b.getAttribute('aria-expanded') === 'true') {
+    b.setAttribute('aria-expanded', 'false');
+    const d = tr.nextElementSibling;
+    if (d && d.classList.contains('det')) d.remove();
+    return;
+  }
+  b.setAttribute('aria-expanded', 'true');
+  const i = Number(b.dataset.twig);
+  const det = document.createElement('tr');
+  det.className = 'det';
+  det.innerHTML = `<td colspan="${tr.children.length}">
+    <div class="empty">consultando o índice…</div></td>`;
+  tr.after(det);
+  try {
+    if (!OVL_CACHE[i]) {
+      const r = OVL[i];
+      OVL_CACHE[i] = await api(`/api/overlap-files?a=${encodeURIComponent(r.a)}`
+        + `&b=${encodeURIComponent(r.b)}&limit=400`);
+    }
+    det.querySelector('td').innerHTML = twigBody(OVL_CACHE[i], i);
+    det.querySelectorAll('[data-resolve]').forEach((bt) =>
+      bt.addEventListener('click', () => openResolve(bt.dataset.resolve, 'sync')));
+    det.querySelectorAll('[data-descartar]').forEach((bt) =>
+      bt.addEventListener('click', () => openResolve(bt.dataset.descartar, 'descartar')));
+  } catch (e) {
+    det.querySelector('td').innerHTML =
+      `<div class="empty">não deu para consultar: ${esc(e.message || e)}</div>`;
+  }
+}
+
+function openResolve(chave, modo) {
+  const [i, j] = chave.split(':').map(Number);
+  const d = OVL_CACHE[i];
+  if (!d || !d.rows[j]) return;
+  RESOLVE = { d, x: d.rows[j], dir: 'a2b', lado: 'b' };
+  (modo === 'descartar' ? descarteSheet : resolveSheet)();
+}
+
 async function panelArvores() {
   const rows = await api('/api/overlap?limit=40');
+  OVL = rows;
   let h = `<div class="phead"><p class="eyebrow">causa raiz</p><h2>Árvores clonadas</h2>
     <p>Pares de diretórios que guardam o mesmo conteúdo com nomes diferentes.
     A coluna <em>igual</em> é quanto os dois têm de arquivo idêntico; <em>sobrep.</em>
     é essa fatia sobre a menor das duas árvores. Nenhum buscador de duplicata
-    reporta isso como uma coisa só.</p></div>`;
+    reporta isso como uma coisa só.</p>
+    <p class="note">Clique no número de <b>arq.</b> para ver quais arquivos sustentam
+    o par.</p></div>`;
   h += table(['Árvore A', 'Árvore B', 'Igual', 'Sobrep.', 'Arq.'],
-    rows.map((r) => [tdp(r.a), tdp(r.b), tdn(H(r.shared)),
-      tdn(`${Number(r.pct).toFixed(0)}%`), tdn(N(r.files))]));
+    rows.map((r, i) => [tdp(r.a), tdp(r.b), tdn(H(r.shared)),
+      tdn(`${Number(r.pct).toFixed(0)}%`), twigCell(r.files, i)]));
   const arch = await api('/api/archives?limit=30');
   h += `<h3 style="margin:28px 0 12px">Compactado com a pasta extraída ao lado</h3>`;
   h += table(['Arquivo', 'Volume', 'Tamanho', ''],
     arch.map((r) => [tdp(r.relpath), `<td>${esc(r.label)}</td>`, tdn(H(r.bytes)),
       actCell(absRel(r.label, r.relpath))]));
   el('p-arvores').innerHTML = h;
+  el('p-arvores').querySelectorAll('[data-twig]').forEach(
+    (b) => b.addEventListener('click', () => toggleTwig(b)));
+}
+
+/* ---------------------------------------------------------------- Acervo
+   Uma aba para a pergunta "o que eu tenho?", respondida por tipo. Imagens
+   continuam com o painel especialista que já existia — dimensão, biblioteca,
+   hash visual, grupos parecidos. Vídeo, documento e o resto não têm nada disso
+   e não precisam: o que falta ali é poder olhar.
+
+   O ícone de quem não tem miniatura é desenhado aqui, em SVG, e não baixado de
+   um banco de ícones: a ferramenta funciona offline por princípio, e um PNG de
+   terceiro num repositório GPL é uma pergunta de licença que ninguém quer
+   responder depois. */
+const ACERVO_ABAS = [
+  ['imagem', 'Imagens'], ['documento', 'Documentos'],
+  ['video', 'Vídeos'], ['outro', 'Outros'],
+];
+let ACV_TIPO = 'imagem';
+const ACV_F = { vol: '', ext: '', sort: 'size', comthumb: '' };
+const ACV_PG = 120;      // por página
+let ACV_PAGE = 0;
+
+/* Famílias de extensão, não extensões soltas: a lista fechada é o que mantém o
+   ícone honesto — o que não está aqui ganha a folha genérica em vez de um
+   desenho que sugere um conteúdo que ninguém verificou. */
+const ICON_FAM = [
+  [/^(pdf)$/, 'pdf', '#e5484d'],
+  [/^(doc|docx|odt|rtf|pages|txt|md)$/, 'texto', '#3b82f6'],
+  [/^(xls|xlsx|ods|csv|numbers)$/, 'tabela', '#22c55e'],
+  [/^(ppt|pptx|odp|key)$/, 'slides', '#f97316'],
+  [/^(zip|rar|7z|gz|bz2|xz|tar|iso|dmg)$/, 'caixa', '#a855f7'],
+  [/^(mp3|wav|flac|aac|m4a|ogg|wma)$/, 'audio', '#06b6d4'],
+  [/^(mp4|mkv|avi|mov|wmv|flv|webm|mpg|mpeg)$/, 'video', '#ec4899'],
+  [/^(exe|msi|app|deb|pkg|bin)$/, 'binario', '#64748b'],
+  [/^(c|h|cpp|cs|js|ts|py|java|go|rs|rb|php|sh|html|css|json|xml)$/, 'codigo', '#eab308'],
+];
+
+function iconFor(ext) {
+  const e = (ext || '').toLowerCase();
+  const fam = ICON_FAM.find(([re]) => re.test(e));
+  const [, nome, cor] = fam || [null, 'arquivo', 'var(--fg-3)'];
+  const glifo = {
+    pdf: 'PDF', texto: 'TXT', tabela: 'XLS', slides: 'PPT', caixa: 'ZIP',
+    audio: '♪', video: '▶', binario: 'EXE', codigo: '{ }', arquivo: '',
+  }[nome];
+  return `<svg viewBox="0 0 64 64" class="ficon" role="img"
+    aria-label="${esc(e || 'arquivo')}">
+    <path d="M14 4h26l12 12v44a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z"
+      fill="var(--surface-2)" stroke="${cor}" stroke-width="2"/>
+    <path d="M40 4v12h12" fill="none" stroke="${cor}" stroke-width="2"/>
+    <text x="32" y="44" text-anchor="middle" fill="${cor}"
+      font-family="var(--mono)" font-size="${glifo.length > 2 ? 13 : 20}"
+      font-weight="600">${esc(glifo)}</text>
+    <text x="32" y="57" text-anchor="middle" fill="var(--fg-3)"
+      font-family="var(--mono)" font-size="8">${esc(e.slice(0, 6))}</text>
+  </svg>`;
+}
+
+async function panelAcervo() {
+  const alvo = el('p-acervo');
+  // O hash primeiro, sempre: a sub-aba e as etiquetas vêm dele, e calcular a
+  // contagem antes de ler o filtro dava contagem do acervo inteiro.
+  // '#acervo:video&tag=Musica' é sub-aba 'video' filtrada por 'Séries'.
+  const pedido = ((location.hash || '').split(':')[1] || '').split('&')[0];
+  if (pedido && ACERVO_ABAS.some(([k]) => k === pedido)) ACV_TIPO = pedido;
+  lerTagsDoHash();
+  await carregaTags();
+  // Sob filtro, cada sub-aba diz quanto tem: abrir uma aba vazia sem aviso faz
+  // parecer que o filtro quebrou.
+  let cont = null;
+  if (TAGS_ON.size) {
+    const q = new URLSearchParams();
+    [...TAGS_ON].forEach((n) => q.append('tag', n));
+    try { cont = (await api('/api/acervo-contagem?' + q)).contagem; } catch (_) {}
+  }
+  ACV_CONT = cont;
+  alvo.innerHTML = `<div class="phead"><p class="eyebrow">o que você tem</p>
+    <h2>Acervo</h2><p>O mesmo acervo visto por tipo de conteúdo. Cada aba traz
+    os filtros que fazem sentido para ela.</p></div>
+    <div class="subtabs" role="tablist">${ACERVO_ABAS.map(([k, t]) =>
+      `<button role="tab" data-acv="${k}" aria-selected="${k === ACV_TIPO}"
+        >${t}${cont ? ` <span class="cnt">${N(cont[k] || 0)}</span>` : ''}</button>`).join('')}</div>
+    ${chipsHTML()}
+    <div id="acv-corpo"></div>`;
+  ligaChips(alvo, () => { ACV_PAGE = 0; panelAcervo(); });
+  alvo.querySelectorAll('[data-acv]').forEach((b) => b.addEventListener('click', () => {
+    ACV_TIPO = b.dataset.acv;
+    ACV_F.vol = ''; ACV_F.ext = ''; ACV_F.comthumb = ''; ACV_PAGE = 0;
+    const q = [...TAGS_ON].map((n) => 'tag=' + encodeURIComponent(n)).join('&');
+    try { location.hash = 'acervo:' + ACV_TIPO + (q ? '&' + q : ''); } catch (_) {}
+    panelAcervo();
+  }));
+  const corpo = el('acv-corpo');
+  if (ACV_TIPO === 'imagem') { await panelImagens(corpo); return; }
+  await listaAcervo(corpo);
+}
+
+async function listaAcervo(corpo) {
+  corpo.innerHTML = '<div class="empty">consultando o índice…</div>';
+  const qs = new URLSearchParams({ tipo: ACV_TIPO, limit: String(ACV_PG),
+    offset: String(ACV_PAGE * ACV_PG), sort: ACV_F.sort });
+  [...TAGS_ON].forEach((n) => qs.append('tag', n));
+  if (ACV_F.vol) qs.set('vol', ACV_F.vol);
+  if (ACV_F.ext) qs.set('ext', ACV_F.ext);
+  if (ACV_F.comthumb) qs.set('comthumb', '1');
+  let d;
+  try { d = await api('/api/acervo?' + qs.toString()); } catch (e) {
+    corpo.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return;
+  }
+  // `total` é a classe inteira; `filtrado` é o que os filtros atuais deixam, e
+  // é ele que decide quantas páginas existem. Paginar sobre o número errado faz
+  // o botão "próximas" prometer páginas vazias.
+  const filtrado = d.filtrado;
+  const paginas = Math.max(1, Math.ceil(filtrado / ACV_PG));
+  if (ACV_PAGE >= paginas) { ACV_PAGE = paginas - 1; return listaAcervo(corpo); }
+  const semRender = d.total - d.com_thumb - d.faltam;
+  const mes = (m) => (m ? new Date(m * 1000).toISOString().slice(0, 7) : '—');
+  corpo.innerHTML = `
+    <div class="row" style="flex-wrap:wrap;gap:10px">
+      <label>volume <select data-f="vol"><option value="">todos</option>
+        ${d.vols.map((v) => `<option${v === ACV_F.vol ? ' selected' : ''}>${esc(v)}</option>`).join('')}
+      </select></label>
+      <label>tipo <select data-f="ext"><option value="">todos</option>
+        ${d.exts.map((x) => `<option value="${esc(x.ext)}"${x.ext === ACV_F.ext ? ' selected' : ''}
+          >.${esc(x.ext)} (${N(x.n)})</option>`).join('')}
+      </select></label>
+      <label>ordem <select data-f="sort">
+        ${[['size', 'maiores'], ['recent', 'mais novos'], ['old', 'mais antigos'],
+           ['name', 'nome']].map(([v, t]) =>
+          `<option value="${v}"${v === ACV_F.sort ? ' selected' : ''}>${t}</option>`).join('')}
+      </select></label>
+      <label><input type="checkbox" data-f="comthumb"${ACV_F.comthumb ? ' checked' : ''}>
+        só com miniatura</label>
+    </div>
+    <p class="note">${filtrado === d.total
+      ? `${N(d.total)} arquivos, ${H(d.bytes)}`
+      : `${N(filtrado)} de ${N(d.total)} arquivos sob estes filtros, ${H(d.bytes_filtrado)}`}.
+      ${N(d.com_thumb)} têm miniatura${d.faltam > 0 ? `; <b>${N(d.faltam)} estão na
+      fila</b> — gere com <code>python3 -m diskmap acervo --cls ${
+        esc(d.rows[0] ? d.rows[0].cls : '')}</code> ou pela aba Tarefas` : ''}${
+      semRender > 0 ? `; ${N(semRender)} não têm renderizador e ficam com ícone
+      para sempre` : ''}.${!d.ffmpeg && ACV_TIPO === 'video'
+      ? ' <b>ffmpeg não está instalado</b>, então mkv, avi, wmv, flv e webm ficam só com ícone.' : ''}</p>
+    ${nadaPorInterseccao(filtrado)}
+    ${barraSelecao()}
+    <div class="row" style="margin-top:10px">
+      <button class="btn" data-seltodos>marcar/desmarcar os desta página</button>
+    </div>
+    <div class="grade">${d.rows.map((r) => `
+      <figure class="cart${SEL.has(r.abs) ? ' sel' : ''}">
+        ${selCheck(r.abs)}
+        <div class="cart-img">${r.thumb
+          ? `<img src="/thumb/${r.id}.jpg" alt="" loading="lazy">`
+          : iconFor(r.ext)}${!r.thumb && r.pode && !r.note
+            ? '<span class="pend" title="o renderizador ainda não passou por este arquivo">na fila</span>'
+            : ''}</div>
+        <figcaption>
+          <div class="cart-nome" title="${esc(r.rel)}">${esc(r.name)}</div>
+          <div class="cart-meta">${H(r.size)} · ${mes(r.mtime)} · ${esc(r.label)}</div>
+          ${r.width ? `<div class="cart-meta">${r.width}×${r.height}</div>` : ''}
+          ${r.note ? `<div class="cart-meta" style="color:var(--fg-3)">${esc(r.note)}</div>` : ''}
+        </figcaption>
+        ${ACTIONS_ON && r.abs ? `<button class="actbtn" data-act-path="${esc(r.abs)}"
+          >ações</button>` : ''}
+      </figure>`).join('')}</div>
+    <div class="gridbar" style="margin-top:16px">
+      <button class="btn" data-pg="-1"${ACV_PAGE === 0 ? ' hidden' : ''}>← anteriores</button>
+      <span class="note" style="margin:0">${filtrado === d.total ? '' : N(filtrado) + ' de '}
+        ${N(d.total)} arquivos${paginas > 1
+          ? ` · página ${N(ACV_PAGE + 1)} de ${N(paginas)}` : ''}</span>
+      <button class="btn" data-pg="1"${(ACV_PAGE + 1) * ACV_PG >= filtrado
+        ? ' hidden' : ''}>próximas →</button>
+    </div>`;
+  corpo.querySelectorAll('[data-pg]').forEach((b) => b.addEventListener('click', () => {
+    ACV_PAGE += Number(b.dataset.pg);
+    listaAcervo(corpo).then(() => corpo.scrollIntoView({ block: 'start' }));
+  }));
+  ligaSelecao(corpo, () => listaAcervo(corpo));
+  corpo.querySelectorAll('[data-f]').forEach((c) => c.addEventListener('change', () => {
+    ACV_F[c.dataset.f] = c.type === 'checkbox' ? (c.checked ? '1' : '') : c.value;
+    ACV_PAGE = 0;              // filtro novo, contagem nova: começar do início
+    listaAcervo(corpo);
+  }));
 }
 
 const VER_TAG = {
@@ -986,16 +1648,172 @@ async function panelDuplicatas() {
       <option value="full">hash completo</option>
       <option value="mismatch">divergentes</option>
     </select></div>`;
+  h += `<p class="note">Clique no número de <b>cópias</b> para ver cada uma e
+    escolher qual fica.</p>`;
   h += table(['Arquivo', 'Tam.', 'Cópias', 'Redundante', 'Estado', 'Onde'],
     rows.map((r) => [
-      tdp(r.name), tdn(H(r.size)), tdn(r.copies + '×'), tdn(H(r.wasted)),
+      tdp(r.name), tdn(H(r.size)), dupCell(r.copies, r.id), tdn(H(r.wasted)),
       `<td>${VER_TAG[r.verified] || esc(r.verified)}</td>`,
       `<td class="path">${r.paths.slice(0, 4).map(esc).join('<br>')}${
         r.paths.length > 4 ? `<br><span style="color:var(--fg-3)">+${r.paths.length - 4} outro(s)</span>` : ''}</td>`,
     ]));
   el('p-duplicatas').innerHTML = h;
+  el('p-duplicatas').querySelectorAll('[data-dup]').forEach(
+    (b) => b.addEventListener('click', () => toggleDup(b)));
   const s2 = el('dupfilter');
   if (s2) { s2.value = f; s2.addEventListener('change', panelDuplicatas); }
+}
+
+/* A gaveta de duplicatas. Mesmo gesto da aba de árvores, com uma diferença que
+   muda tudo: ali são dois lados, aqui são N cópias. Agir uma por vez num grupo
+   de cinco é trabalho repetido e a forma fácil de terminar sem nenhuma, então a
+   operação é do grupo: uma fica, as outras saem. */
+const DUP_CACHE = {};
+const DUP_KEEP = {};   // grupo -> caminho absoluto escolhido para ficar
+
+const dupCell = (n, grp) => `<td class="num twigcell">
+  <button class="twig" data-dup="${grp}" aria-expanded="false"
+    title="ver as cópias e escolher qual fica">${N(n)}×<span class="arrow"
+    aria-hidden="true">▸</span></button></td>`;
+
+function dupBody(d) {
+  if (d.erro) return `<div class="empty">${esc(d.erro)}</div>`;
+  const mes = (m) => (m ? new Date(m * 1000).toISOString().slice(0, 7) : '—');
+  // O primeiro da lista já vem ordenado por keep_score e com os ausentes no
+  // fim, então o default é o melhor sobrevivente que de fato existe.
+  const vivos = d.membros.filter((m) => m.exists);
+  const escolhido = DUP_KEEP[d.id] || (vivos[0] && vivos[0].abs);
+  const linhas = d.membros.map((m) => {
+    const marcado = m.exists && m.abs === escolhido;
+    const nota = !m.abs ? ' <span class="tag warn">volume desmontado</span>'
+      : !m.exists ? ' <span class="tag crit">não está mais no disco</span>' : '';
+    return [
+      `<td class="num">${ACTIONS_ON && m.exists
+        ? `<input type="radio" name="keep${d.id}" data-keep="${esc(m.abs)}"
+             data-grp="${d.id}"${marcado ? ' checked' : ''}>` : ''}</td>`,
+      `<td class="path"><span class="hi">${esc(m.full)}</span></td>`,
+      tdn(H(m.size)), tdn(mes(m.mtime)),
+      `<td class="path">${esc(m.reason)}${nota}</td>`,
+    ];
+  });
+  const velho = d.sumidos ? `<div class="warnbox crit"><b>${N(d.sumidos)} de
+    ${N(d.membros.length)} cópias não estão mais no disco.</b> O índice é de uma
+    varredura anterior e envelheceu. Rode <b>Indexar um volume</b> e
+    <b>Recalcular achados</b> antes de agir neste grupo.</div>` : '';
+  const gate = d.verified === 'mismatch'
+    ? `<div class="warnbox crit"><b>Grupo divergente.</b> O hash provou que estas
+       cópias têm conteúdo diferente — são arquivos distintos com o mesmo nome e
+       tamanho. Não há redundância para remover, e descartar aqui perde conteúdo.
+       O botão está desligado de propósito.</div>`
+    : d.verified === 'full'
+      ? `<div class="warnbox ok"><b>sha256 confirmado nas ${N(d.copies)} cópias.</b>
+         Descartar as outras libera <b>${H(d.wasted)}</b> sem perder conteúdo.</div>`
+      : `<div class="warnbox warn"><b>${d.verified === 'quick'
+          ? 'Só o hash parcial foi conferido' : 'Ninguém conferiu o conteúdo'}.</b>
+         Nome e tamanho é candidato, não prova. Confira antes de descartar.</div>`;
+  return `<div class="twigbox">${velho}${gate}
+    ${table([ACTIONS_ON ? 'fica' : '', 'Cópia', 'Tam.', 'quando', 'por quê'], linhas)}
+    ${ACTIONS_ON ? `<div class="sheet-foot" style="justify-content:flex-start">
+      ${d.verified === 'full' || d.verified === 'mismatch' ? '' :
+        `<button class="btn" data-vgrp="${d.id}">Conferir agora (sha256)</button>`}
+      <button class="btn danger" data-dgrp="${d.id}"${
+        d.verified === 'mismatch' || d.sumidos || vivos.length < 2
+          ? ' disabled' : ''}>descartar as outras
+        ${N(Math.max(0, vivos.length - 1))}</button></div>` : ''}</div>`;
+}
+
+async function toggleDup(b) {
+  const tr = b.closest('tr');
+  if (b.getAttribute('aria-expanded') === 'true') {
+    b.setAttribute('aria-expanded', 'false');
+    const d = tr.nextElementSibling;
+    if (d && d.classList.contains('det')) d.remove();
+    return;
+  }
+  b.setAttribute('aria-expanded', 'true');
+  const grp = b.dataset.dup;
+  const det = document.createElement('tr');
+  det.className = 'det';
+  det.innerHTML = `<td colspan="${tr.children.length}">
+    <div class="empty">consultando o índice…</div></td>`;
+  tr.after(det);
+  try {
+    if (!DUP_CACHE[grp]) DUP_CACHE[grp] = await api(`/api/dup-members?grp=${grp}`);
+    pintaDup(det, DUP_CACHE[grp]);
+  } catch (e) {
+    det.querySelector('td').innerHTML =
+      `<div class="empty">não deu para consultar: ${esc(e.message || e)}</div>`;
+  }
+}
+
+function pintaDup(det, d) {
+  det.querySelector('td').innerHTML = dupBody(d);
+  det.querySelectorAll('[data-keep]').forEach((r) => r.addEventListener('change', () => {
+    DUP_KEEP[r.dataset.grp] = r.dataset.keep;
+  }));
+  const v = det.querySelector('[data-vgrp]');
+  if (v) v.addEventListener('click', () => conferirGrupo(d, det));
+  const g = det.querySelector('[data-dgrp]');
+  if (g) g.addEventListener('click', () => descartarGrupo(d));
+}
+
+async function conferirGrupo(d, det) {
+  const box = det.querySelector('.sheet-foot');
+  box.innerHTML = '<pre class="out">lendo as cópias do disco…</pre>';
+  try {
+    const r = await post('/api/verify-group', { grp: d.id, stage: 'full' });
+    d.verified = r.verified;
+    DUP_CACHE[d.id] = d;
+    toast(r.output, r.verified === 'mismatch' ? 'err' : 'ok');
+    loaded.duplicatas = false;
+    pintaDup(det, d);
+  } catch (e) {
+    box.innerHTML = `<div class="warnbox crit">${esc(e.message)}</div>`;
+  }
+}
+
+function descartarGrupo(d) {
+  const fica = DUP_KEEP[d.id] || (d.membros[0] && d.membros[0].abs);
+  const saem = d.membros.filter((m) => m.exists && m.abs !== fica);
+  const bytes = saem.reduce((a, m) => a + m.size, 0);
+  sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true">
+    <h3>Descartar ${N(saem.length)} cópia(s) · ${esc(d.name)}</h3>
+    <div class="warnbox${d.verified === 'full' ? ' ok' : ' warn'}">
+      Libera <b>${H(bytes)}</b>. ${d.verified === 'full'
+        ? 'As cópias têm sha256 idêntico: nada de conteúdo se perde.'
+        : 'O conteúdo <b>não</b> foi confirmado por hash — isto é uma aposta.'}</div>
+    <div class="sheet-path"><b>fica</b> ${esc(fica)}</div>
+    ${saem.map((m) => `<div class="sheet-path"><b>sai</b> ${esc(m.abs)}</div>`).join('')}
+    <div class="warnbox">Tudo vai para <code>.diskmap-quarantine</code> no volume
+      de cada uma. Nada é apagado, e o Histórico desfaz uma a uma.</div>
+    <div class="sheet-foot">
+      <button class="btn" data-close>Cancelar</button>
+      <button class="btn danger" data-go>Descartar ${N(saem.length)}</button>
+    </div></div>`;
+  sheet().hidden = false;
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+  sheet().querySelector('[data-go]').addEventListener('click', async () => {
+    sheet().innerHTML = `<div class="sheet-in"><h3>Descartando…</h3>
+      <pre class="out">movendo para a quarentena…</pre></div>`;
+    const foot = '<div class="sheet-foot"><button class="btn" data-close>Fechar</button></div>';
+    try {
+      const res = await post('/api/discard-group', { grp: d.id, keep: fica });
+      sheet().innerHTML = `<div class="sheet-in"><h3>${esc(d.name)}</h3>
+        <pre class="out">${esc(res.output)}</pre>
+        ${res.falhas.length ? `<div class="warnbox crit">${
+          res.falhas.map((f) => esc(f.path + ' — ' + f.erro)).join('<br>')}</div>` : ''}
+        <div class="warnbox ok">ficou: <code>${esc(res.kept)}</code></div>
+        ${reindexNota()}${foot}</div>`;
+      toast(`${res.descartados.length} na quarentena · ${H(res.bytes)}`, 'ok');
+      loaded.duplicatas = false; loaded.historico = false; loaded.resumo = false;
+      delete DUP_CACHE[d.id];
+    } catch (e) {
+      sheet().innerHTML = `<div class="sheet-in"><h3>${esc(d.name)}</h3>
+        <div class="warnbox crit">${esc(e.message)}</div>${foot}</div>`;
+      toast(e.message, 'err');
+    }
+    sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+  });
 }
 
 async function panelPastas() {
@@ -1039,39 +1857,360 @@ async function panelFrio() {
 }
 
 let searchTimer = null;
+/* ------------------------------------------------------------- etiquetas
+   O único dado deste índice que ninguém consegue recalcular. Duplicata, hash,
+   miniatura: tudo isso se refaz com tempo. "isto é música" é um juízo, e some
+   para sempre se o lugar errado guardar.
+
+   Na busca elas são balões: entram no filtro com um clique e saem pelo × —
+   nada de uma sintaxe escondida que você tenha de lembrar. */
+let TAGS = [];                 // o catálogo, recarregado quando muda
+const TAGS_ON = new Set();     // as que estão filtrando agora
+
+/* O filtro vive no hash: '#acervo:video&tag=Musica'. Um filtro que não cabe num
+   link é um filtro que você não consegue mandar para ninguém nem recuperar
+   depois de recarregar — e aqui ele também é o que o botão "ver no acervo"
+   carrega de um painel para o outro. */
+function lerTagsDoHash() {
+  const h = (location.hash || '').replace('#', '');
+  const q = h.includes('&') ? h.slice(h.indexOf('&') + 1) : '';
+  const vindas = new URLSearchParams(q).getAll('tag');
+  if (vindas.length) { TAGS_ON.clear(); vindas.forEach((t) => TAGS_ON.add(t)); }
+}
+
+function gravaTagsNoHash() {
+  const h = (location.hash || '').replace('#', '');
+  const base = h.split('&')[0] || 'busca';
+  const q = [...TAGS_ON].map((t) => 'tag=' + encodeURIComponent(t)).join('&');
+  try { location.hash = base + (q ? '&' + q : ''); } catch (_) {}
+}
+
+async function carregaTags() {
+  try { TAGS = (await api('/api/tags')).tags || []; } catch (_) { TAGS = []; }
+  return TAGS;
+}
+
+const balao = (n, ativa) => (ativa
+  ? `<span class="chip on">${esc(n)}
+      <button data-chipoff="${esc(n)}" aria-label="tirar o filtro ${esc(n)}">×</button>
+    </span>`
+  : `<button class="chip" data-chipon="${esc(n)}">${esc(n)}</button>`);
+
+/* Duas camadas: na primeira, as etiquetas-raiz; na segunda, as filhas das que
+   estão ativas. A segunda linha só existe quando há filha para mostrar, e diz
+   de quem é cada grupo quando mais de uma mãe está ativa — senão "Extras" e
+   "Extras" de mães diferentes ficariam lado a lado sem dizer de onde vêm. */
+function chipsHTML() {
+  const raizes = TAGS.filter((t) => !t.parent);
+  const ativas = [...TAGS_ON];
+  const linha1 = [
+    ...ativas.filter((n) => raizes.some((t) => t.name === n)).map((n) => balao(n, true)),
+    ...raizes.filter((t) => !TAGS_ON.has(t.name) && (t.caminhos || TAGS.some(
+      (f) => f.parent === t.id))).map((t) => balao(t.name, false)),
+  ];
+  const grupos = [];
+  ativas.forEach((n) => {
+    const mae = TAGS.find((t) => t.name === n);
+    if (!mae) return;
+    const filhas = TAGS.filter((t) => t.parent === mae.id);
+    if (!filhas.length) return;
+    grupos.push({ mae: mae.name, filhas });
+  });
+  // Filha ativa cujo pai saiu do filtro continua visível: tirar o balão de uma
+  // coisa que ainda está filtrando é esconder o filtro de quem o ligou.
+  const orfas = ativas.filter((n) => {
+    const t = TAGS.find((x) => x.name === n);
+    return t && t.parent && !ativas.includes(t.pai_nome);
+  });
+  if (!linha1.length && !grupos.length && !orfas.length) return '';
+  const varias = grupos.length > 1;
+  return `<div class="chips">${linha1.join('')}
+    ${orfas.map((n) => balao(n, true)).join('')}</div>
+    ${grupos.map((g) => `<div class="chips sub">
+      ${varias ? `<span class="subde">${esc(g.mae)} ›</span>` : ''}
+      ${g.filhas.map((f) => balao(f.name, TAGS_ON.has(f.name))).join('')}
+    </div>`).join('')}`;
+}
+
+/* Duas etiquetas somam exigência, não alternativa: o arquivo precisa ter as
+   duas. É o que empilhar filtro significa em qualquer outro lugar da ferramenta
+   — mas dá zero sem explicação, e zero sem explicação parece defeito. */
+function nadaPorInterseccao(n) {
+  if (n || TAGS_ON.size < 2) return '';
+  return `<div class="warnbox">Nenhum arquivo tem <b>todas</b> as
+    ${N(TAGS_ON.size)} etiquetas ao mesmo tempo. Empilhar etiquetas soma
+    exigência; tire uma no × para ver o que cada uma cobre.</div>`;
+}
+
+/* ------------------------------------------------- seleção em massa
+   Etiquetar um por um não escala, mas etiquetar 262 arquivos também não é a
+   melhor resposta quando eles moram em 9 pastas: a etiqueta de pasta já cobre
+   o conteúdo, inclusive o que entrar depois. A barra diz isso em vez de deixar
+   a pessoa descobrir sozinha depois de gravar 262 linhas. */
+const SEL = new Set();
+
+const selCheck = (abs) => (!abs ? '' : `<input type="checkbox" class="selbox"
+  data-sel="${esc(abs)}"${SEL.has(abs) ? ' checked' : ''}
+  aria-label="selecionar para etiquetar">`);
+
+const soPastas = () => [...SEL].every((p) => !/\.[A-Za-z0-9]{1,6}$/.test(p));
+
+function barraSelecao() {
+  if (!SEL.size) return '';
+  return `<div class="selbar" role="region" aria-label="seleção">
+    <b data-selcount>${N(SEL.size)}</b> selecionado(s)
+    <input class="textin" id="selnome" list="taglist" placeholder="etiqueta…"
+      maxlength="48">
+    <datalist id="taglist">${TAGS.map((t) =>
+      `<option value="${esc(t.name)}">`).join('')}</datalist>
+    <select id="selpai"><option value="">solta</option>
+      ${TAGS.filter((t) => !t.parent).map((t) =>
+        `<option value="${esc(t.name)}">dentro de ${esc(t.name)}</option>`).join('')}
+    </select>
+    <button class="btn primary" data-selgo="add">etiquetar</button>
+    <button class="btn" data-selgo="remove">tirar</button>
+    <button class="btn" data-selclear>limpar</button>
+    <span class="selhint"${soPastas() ? ' hidden' : ''}>dica: etiquetar a
+      <b>pasta</b> cobre tudo que está dentro, inclusive o que entrar depois</span>
+  </div>`;
+}
+
+/* Marcar uma caixa não pode custar uma consulta ao índice.
+   A primeira versão religava tudo com um redesenho, e redesenhar é refazer a
+   busca: a grade piscava "consultando o índice…" a cada clique e a página
+   voltava para o topo. Aqui o clique mexe só no que mudou — a classe do
+   cartão e o contador da barra — e a barra só é criada ou removida quando
+   cruza o zero. O valor digitado no campo de etiqueta sobrevive, porque o nó
+   não é recriado. */
+function sincronizaBarra(alvo, redesenha) {
+  let bar = alvo.querySelector('.selbar');
+  if (!SEL.size) {
+    if (bar) bar.remove();
+    return;
+  }
+  if (!bar) {
+    const ancora = alvo.querySelector('.grade') || alvo.querySelector('.grid')
+      || alvo.querySelector('.tw');
+    if (!ancora) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = barraSelecao();
+    bar = tmp.firstElementChild;
+    ancora.parentNode.insertBefore(bar, ancora);
+    ligaBotoesDaBarra(alvo, redesenha);
+    return;
+  }
+  bar.querySelector('[data-selcount]').textContent = N(SEL.size);
+  const dica = bar.querySelector('.selhint');
+  if (dica) dica.hidden = soPastas();
+}
+
+function marcaCartao(c) {
+  const cartao = c.closest('.cart, .sh, tr');
+  if (cartao) cartao.classList.toggle('sel', c.checked);
+}
+
+function ligaSelecao(alvo, redesenha) {
+  alvo.querySelectorAll('[data-sel]').forEach((c) => c.addEventListener('change', () => {
+    if (c.checked) SEL.add(c.dataset.sel); else SEL.delete(c.dataset.sel);
+    marcaCartao(c);
+    sincronizaBarra(alvo, redesenha);
+  }));
+  const todos = alvo.querySelector('[data-seltodos]');
+  if (todos) todos.addEventListener('click', () => {
+    const cx = [...alvo.querySelectorAll('[data-sel]')];
+    const ligar = cx.some((c) => !SEL.has(c.dataset.sel));
+    cx.forEach((c) => {
+      if (ligar) SEL.add(c.dataset.sel); else SEL.delete(c.dataset.sel);
+      c.checked = ligar;
+      marcaCartao(c);
+    });
+    sincronizaBarra(alvo, redesenha);
+  });
+  ligaBotoesDaBarra(alvo, redesenha);
+}
+
+function ligaBotoesDaBarra(alvo, redesenha) {
+  const limpar = alvo.querySelector('[data-selclear]');
+  if (limpar) limpar.addEventListener('click', () => {
+    SEL.clear();
+    alvo.querySelectorAll('[data-sel]').forEach((c) => {
+      c.checked = false; marcaCartao(c);
+    });
+    sincronizaBarra(alvo, redesenha);
+  });
+  alvo.querySelectorAll('[data-selgo]').forEach((b) => b.addEventListener('click', async () => {
+    const nome = (alvo.querySelector('#selnome').value || '').trim();
+    if (!nome) { toast('escreva o nome da etiqueta', 'err'); return; }
+    const pai = alvo.querySelector('#selpai').value || null;
+    const acao = b.dataset.selgo;
+    b.disabled = true;
+    try {
+      const r = await post('/api/tag-bulk', { name: nome, paths: [...SEL], pai, acao });
+      toast(r.output, r.ok ? 'ok' : 'err');
+      if (r.pulados && r.pulados.length) {
+        console.warn('caminhos recusados', r.pulados);
+      }
+      SEL.clear();
+      await carregaTags();
+      loaded.busca = false; loaded.acervo = false;
+    } catch (e) { toast(e.message, 'err'); }
+    b.disabled = false;
+    redesenha();
+  }));
+}
+
+function ligaChips(alvo, redesenha) {
+  alvo.querySelectorAll('[data-chipon]').forEach((b) => b.addEventListener('click', () => {
+    TAGS_ON.add(b.dataset.chipon); gravaTagsNoHash(); redesenha();
+  }));
+  alvo.querySelectorAll('[data-chipoff]').forEach((b) => b.addEventListener('click', () => {
+    TAGS_ON.delete(b.dataset.chipoff); gravaTagsNoHash(); redesenha();
+  }));
+}
+
 async function panelBusca(term) {
   const t = (term !== undefined ? term : (el('q').value || '')).trim();
   const target = el('p-busca');
-  if (t.length < 2) {
-    target.innerHTML = `<div class="phead"><p class="eyebrow">offline</p><h2>Onde está…</h2>
-      <p>Digite ao menos dois caracteres. A busca responde pelo índice, então acha
-      arquivo em disco desconectado — e te diz em qual volume plugar.</p></div>`;
+  lerTagsDoHash();
+  await carregaTags();
+  const cabeca = `<div class="phead"><p class="eyebrow">offline</p><h2>Onde está…</h2>
+      <p>A busca responde pelo índice, então acha arquivo em disco desconectado
+      — e te diz em qual volume plugar. Clique numa etiqueta para filtrar por
+      ela.</p></div>${chipsHTML()}`;
+  if (t.length < 2 && !TAGS_ON.size) {
+    target.innerHTML = cabeca
+      + '<div class="empty">digite ao menos dois caracteres, ou escolha uma etiqueta</div>';
+    ligaChips(target, () => panelBusca(term));
     return;
   }
-  const res = await api('/api/search?q=' + encodeURIComponent(t) + '&limit=200');
+  const qs = new URLSearchParams({ limit: '200' });
+  if (t.length >= 2) qs.set('q', t);
+  [...TAGS_ON].forEach((n) => qs.append('tag', n));
+  const res = await api('/api/search?' + qs.toString());
   const mounted = {}; OV.volumes.forEach((v) => { mounted[v.label] = !!v.mount; });
-  let h = `<div class="phead"><p class="eyebrow">offline</p>
-    <h2>“${esc(t)}”</h2><p>${N(res.files.length)} arquivos e ${N(res.dirs.length)} pastas.</p></div>`;
+  const titulo = [t.length >= 2 ? `“${esc(t)}”` : null,
+    ...[...TAGS_ON].map((n) => `etiqueta ${esc(n)}`)].filter(Boolean).join(' · ');
+  let h = `<div class="phead phead-row"><div>
+      <p class="eyebrow">offline</p>
+      <h2>${titulo}</h2><p>${N(res.files.length)}${res.truncado ? '+' : ''} arquivos
+      e ${N(res.dirs.length)} pastas · ${H(res.bytes)}.</p></div>
+      ${TAGS_ON.size ? '<button class="btn" data-veracervo>ver no acervo →</button>' : ''}
+    </div>${chipsHTML()}`;
   if (res.dirs.length) {
     h += '<h3 style="margin:0 0 12px">Pastas</h3>';
     h += table(['Pasta', 'Tamanho', 'Arquivos'], res.dirs.map((r) => [
       tdp(`${r.label}/${r.relpath}`), tdn(H(r.bytes)), tdn(N(r.files))]));
   }
+  h += nadaPorInterseccao(res.files.length);
   if (res.files.length) {
     h += '<h3 style="margin:28px 0 12px">Arquivos</h3>';
-    h += table(['Arquivo', 'Tamanho', 'Volume', ''], res.files.map((r) => [
+    h += barraSelecao() + `<div class="row" style="margin:8px 0">
+      <button class="btn" data-seltodos>marcar/desmarcar os desta lista</button></div>`;
+    h += table(['', 'Arquivo', 'Tamanho', 'Volume', ''], res.files.map((r) => [
+      `<td class="num">${selCheck(abs(r))}</td>`,
       tdp(fullPath(r)), tdn(H(r.size)),
       `<td>${esc(r.label)} ${mounted[r.label] ? '' : '<span class="tag">plugar</span>'}</td>`,
       mounted[r.label] ? actCell(abs(r)) : '<td class="act"></td>']));
   }
   target.innerHTML = h;
+  ligaChips(target, () => panelBusca(term));
+  ligaSelecao(target, () => panelBusca(term));
+  const vb = target.querySelector('[data-veracervo]');
+  if (vb) vb.addEventListener('click', () => verNoAcervo());
+}
+
+/* Levar o filtro para o Acervo sem cair numa aba vazia: as etiquetas já são
+   estado global, então o que falta é escolher a sub-aba que de fato tem
+   conteúdo sob elas. Perguntar é mais barato que adivinhar. */
+async function verNoAcervo() {
+  const q = new URLSearchParams();
+  [...TAGS_ON].forEach((n) => q.append('tag', n));
+  try {
+    const c = (await api('/api/acervo-contagem?' + q)).contagem || {};
+    const melhor = ACERVO_ABAS.map(([k]) => k)
+      .sort((a, b) => (c[b] || 0) - (c[a] || 0))[0];
+    if (c[melhor]) ACV_TIPO = melhor;
+  } catch (_) { /* sem contagem, mantém a sub-aba atual */ }
+  ACV_PAGE = 0;
+  loaded.acervo = false;
+  const sufixo = [...TAGS_ON].map((n) => 'tag=' + encodeURIComponent(n)).join('&');
+  try { location.hash = 'acervo:' + ACV_TIPO + (sufixo ? '&' + sufixo : ''); }
+  catch (_) {}
+  show('acervo');
+}
+
+/* Atividade: o que está acontecendo no disco neste instante.
+
+   São duas medidas distintas do kernel, e a tela diz isso em voz alta: o
+   contador por dispositivo é exato, o contador por processo é exato, mas o
+   kernel não guarda em qual disco o byte do processo caiu. A coluna de volume
+   vem do lsof e é palpite. Fingir que era cruzamento seria o tipo de número
+   bonito que leva alguém a apagar a coisa errada. */
+let IO_TIMER = null;
+const RT = (b) => H(b) + '/s';
+
+async function panelAtividade() {
+  const t = el('p-atividade');
+  if (!el('io-disks')) {
+    t.innerHTML = `<div class="phead">
+      <h2>Atividade agora</h2>
+      <p>Quanto cada disco está lendo e gravando neste instante, e quais processos
+         seus estão movendo bytes. Atualiza sozinho a cada 2 segundos.</p></div>
+      <h3 id="io-head" class="eyebrow">medindo a primeira janela…</h3>
+      <div id="io-disks"></div>
+      <h3 class="eyebrow" style="margin-top:22px">Processos</h3>
+      <div id="io-procs"></div>
+      <p class="note" id="io-foot" style="margin-top:14px"></p>`;
+  }
+  let r;
+  try {
+    r = await api('/api/io');
+  } catch (e) {
+    el('io-head').textContent = 'erro: ' + e.message;
+    return;
+  }
+  if (!r.warming) {
+    el('io-head').textContent =
+      `lendo ${RT(r.total_read)} · gravando ${RT(r.total_write)} `
+      + `(janela de ${r.seconds.toFixed(1).replace('.', ',')} s)`;
+
+    const mx = Math.max(1, ...r.disks.map((d) => d.read + d.write));
+    el('io-disks').innerHTML = table(
+      ['Disco', 'Volume', 'Lendo', 'Gravando', ''],
+      r.disks.filter((d) => d.read || d.write || d.volumes.length).map((d) => [
+        `<td class="mono">${esc(d.dev)}</td>`,
+        `<td>${esc(d.volumes.join(', ')) || '<span class="iomut">não indexado</span>'}</td>`,
+        tdn(RT(d.read)), tdn(RT(d.write)),
+        `<td style="width:34%"><div class="bar-t"><div class="bar-f" style="width:${
+          (100 * (d.read + d.write) / mx).toFixed(1)}%;background:var(--accent)"></div></div></td>`,
+      ]));
+
+    el('io-procs').innerHTML = r.procs.length ? table(
+      ['PID', 'Processo', 'Lendo', 'Gravando', 'Volumes abertos'],
+      r.procs.map((p) => [
+        `<td class="mono">${p.pid}</td>`,
+        `<td class="path"><span class="hi">${esc(p.comm.split('/').pop())}</span></td>`,
+        tdn(RT(p.read)), tdn(RT(p.write)),
+        `<td>${esc(p.volumes.join(', ')) || '<span class="iomut">—</span>'}</td>`,
+      ])) : '<div class="empty">nenhum processo seu moveu bytes nesta janela</div>';
+
+    el('io-foot').innerHTML =
+      `<b>${N(r.denied)} processos de outro usuário</b> ficam de fora: o kernel só deixa
+       ler o contador dos seus, e <code>sudo</code> incluiria o resto.
+       A coluna <b>volumes abertos</b> vem dos arquivos que o processo tem abertos agora
+       — é palpite de onde ele escreve, não prova de onde o byte caiu. Por isso a soma
+       dos processos não fecha com a soma dos discos.`;
+  }
+  clearTimeout(IO_TIMER);
+  if (!t.hidden) IO_TIMER = setTimeout(panelAtividade, 2000);
 }
 
 /* ---------- shell ---------- */
 const PANELS = {
-  resumo: panelResumo, liberar: panelLiberar, arvores: panelArvores,
+  resumo: panelResumo, atividade: panelAtividade, liberar: panelLiberar,
+  arvores: panelArvores,
   duplicatas: panelDuplicatas, pastas: panelPastas, frio: panelFrio,
-  busca: panelBusca, imagens: panelImagens, tarefas: panelTarefas,
+  busca: panelBusca, acervo: panelAcervo, tarefas: panelTarefas,
   historico: panelHistorico,
 };
 const loaded = {};
@@ -1082,7 +2221,8 @@ async function show(name) {
   });
   Object.keys(PANELS).forEach((k) => { el('p-' + k).hidden = (k !== name); });
   if (name !== 'tarefas') clearTimeout(JOB_TIMER);
-  if (!loaded[name] || name === 'busca' || name === 'tarefas' || name === 'imagens') {
+  if (name !== 'atividade') clearTimeout(IO_TIMER);
+  if (!loaded[name] || ['busca', 'tarefas', 'imagens', 'atividade'].includes(name)) {
     try {
       await PANELS[name]();
       loaded[name] = true;
@@ -1090,7 +2230,12 @@ async function show(name) {
       el('p-' + name).innerHTML = `<div class="empty">erro: ${esc(e.message)}</div>`;
     }
   }
-  try { location.hash = name; } catch (_) {}
+  // Preserva o sufixo quando é a mesma aba, senão abrir '#acervo:video'
+  // reescreveria para '#acervo' antes de o painel ler a sub-aba.
+  try {
+    const atual = (location.hash || '').replace('#', '');
+    if (atual.split(':')[0].split('&')[0] !== name) location.hash = name;
+  } catch (_) {}
 }
 
 function tooltips() {
@@ -1152,7 +2297,9 @@ async function boot() {
   el('sub').textContent = `${N(t.files)} arquivos · ${H(t.bytes)} · ${OV.volumes.length} volumes`
     + (scanned ? ` · índice de ${new Date(scanned * 1000).toLocaleDateString('pt-BR')}` : '')
     + (ACTIONS_ON ? ` · ações ligadas (${ACTS.length})` : ' · somente leitura');
-  const want = (location.hash || '').replace('#', '');
+  // '#acervo:video' é a aba 'acervo' com a sub-aba 'video'; o sufixo é lido
+  // pelo painel, aqui só interessa a aba.
+  const want = (location.hash || '').replace('#', '').split(':')[0].split('&')[0];
   show(PANELS[want] ? want : 'resumo');
 }
 boot();

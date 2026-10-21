@@ -13,7 +13,7 @@ Three rules make this safe enough to expose to a browser:
 
 User actions live in ~/.diskmap/actions.json and are created on first run.
 """
-import json, os, shlex, subprocess, sys, time
+import json, os, shlex, sqlite3, subprocess, sys, time
 from . import db
 
 CONFIG = os.path.expanduser("~/.diskmap/actions.json")
@@ -287,6 +287,395 @@ def run(con, action_id, raw_path, config_path=CONFIG, allow_wipe=False):
     return {"ok": rc == 0, "rc": rc, "output": out[:8000], "path": abspath,
             "moved_to": moved, "action": action_id,
             "argv": " ".join(shlex.quote(a) for a in argv)}
+
+
+# ----------------------------------------------------------- clone resolver
+def _readonly(mount):
+    try:
+        return bool(os.statvfs(mount).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
+
+
+def _protected(abspath):
+    """True when the path sits inside something a launcher owns.
+
+    Launcher installs are protected both ways: writing one file into a game's
+    install corrupts it, and the launcher re-downloads anyway. Both sides are
+    refused, not just the one being replaced -- copying *out of* a launcher over
+    your own copy is how you lose the version you actually edited.
+    """
+    from .analyze import PROTECTED
+    low = abspath.lower()
+    return any(p in low for p in PROTECTED)
+
+
+class _impaciente:
+    """Baixa o busy_timeout dentro do bloco e devolve ao sair.
+
+    A conexão espera 10 s pela trava de propósito, que é o certo para uma
+    escrita que precisa acontecer. Para *descobrir* se a trava está livre, não
+    é: quem a segura é um scan/analyze/verify, que fica com ela por minutos, e
+    gastar os 10 s para então dizer "não deu" transforma uma resposta instantânea
+    em dez segundos parado.
+    """
+
+    def __init__(self, con, ms=250):
+        self.con, self.ms = con, ms
+
+    def __enter__(self):
+        self.con.execute("PRAGMA busy_timeout=%d" % self.ms)
+        return self.con
+
+    def __exit__(self, *exc):
+        self.con.execute("PRAGMA busy_timeout=10000")
+        return False
+
+
+def _index_writable(con):
+    """True when this connection can take the write lock right now.
+
+    scan/import/analyze/verify run one at a time and hold the index's single
+    writer slot for minutes. Anything destructive has to know that BEFORE it
+    starts: replacing a file without being able to record it in `action_log`
+    would leave a change the history tab cannot undo.
+    """
+    try:
+        with _impaciente(con):
+            con.execute("BEGIN IMMEDIATE")
+        con.rollback()
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def compare_pair(con, a_raw, b_raw, persist=True):
+    """sha256 both sides of a cloned pair and say whether they are the same.
+
+    The panel can only show what `verify` happened to have hashed already, so
+    most pairs read "não verificado" -- and the whole point of this feature is
+    to not act on a guess. This turns the guess into an answer, and keeps it:
+    `file_hash` is keyed by file id and survives a re-`analyze`, which rebuilds
+    the derived findings from scratch.
+    """
+    from . import verify as verify_mod
+    out = {}
+    ids = {}
+    for key, raw in (("a", a_raw), ("b", b_raw)):
+        abspath, kind, label, mount = resolve_target(con, raw)
+        if kind != "file":
+            raise ValueError("comparação de hash só vale para arquivo")
+        out[key] = {"path": abspath,
+                    "sha": verify_mod.full_digest(abspath, nocache=True),
+                    "bytes": os.path.getsize(abspath)}
+        rel = os.path.relpath(abspath, mount)
+        head, _, name = rel.rpartition("/")
+        r = con.execute("SELECT f.id FROM files f JOIN dirs d ON d.id=f.dir "
+                        "JOIN volumes v ON v.id=f.vol "
+                        "WHERE v.label=? AND d.relpath=? AND f.name=? LIMIT 1",
+                        (label, head, name)).fetchone()
+        if r:
+            ids[key] = r["id"]
+    # Guardar é bônus, nunca requisito: a resposta que o usuário pediu — "estes
+    # dois são o mesmo arquivo?" — já está calculada, e perdê-la porque um
+    # `verify` está com a trava do índice seria jogar fora a leitura do disco
+    # que acabou de ser feita.
+    out["persisted"] = False
+    if persist and ids:
+        try:
+            with _impaciente(con):
+                for key, fid in ids.items():
+                    con.execute(
+                        "INSERT INTO file_hash (file, quick, full, hashed_at) "
+                        "VALUES (?,NULL,?,?) ON CONFLICT(file) DO UPDATE SET "
+                        "full=excluded.full, hashed_at=excluded.hashed_at",
+                        (fid, out[key]["sha"], int(time.time())))
+                con.commit()
+            out["persisted"] = True
+        except sqlite3.OperationalError as e:
+            con.rollback()
+            out["persist_erro"] = ("não deu para guardar no índice (%s). O "
+                                   "veredito abaixo vale; ele só não fica "
+                                   "salvo até o índice liberar." % e)
+    out["equal"] = out["a"]["sha"] == out["b"]["sha"]
+    return out
+
+
+def discard_one(con, raw, keep=None, expect=None):
+    """Quarantine one copy, having checked that another one survives.
+
+    This is what actually dedups.
+
+    `resolve_clone` makes two copies identical; it frees nothing, because both
+    files still exist. Removing the redundancy means keeping one and taking the
+    other out of the way -- and "out of the way" here is the quarantine, never
+    unlink: the file stays on the same volume, under its original relative path,
+    and the history tab puts it back.
+
+    The same two rails as the resolver, for the same reasons: a launcher's
+    install is refused (pulling one file out of a game corrupts it), and a
+    locked index means no record, which means no undo, which means don't.
+
+    `keep` is the copy that must remain, and it is REQUIRED: a dedup action
+    whose last click leaves zero copies is not a dedup, it is a deletion with
+    extra steps. Nothing about "there are N copies" is taken on faith from the
+    index, which is a photograph and may be stale -- the surviving file is
+    stat-ed on disk, right now, before anything moves.
+
+    `expect` is the sha256 the caller believed this file had; when it is given
+    and the file no longer hashes to it, nothing moves.
+    """
+    ensure_log(con)
+    if not _index_writable(con):
+        raise ValueError(
+            "o índice está travado por outra tarefa (um scan, analyze ou verify "
+            "em curso na aba Tarefas). Sem poder registrar no histórico, o "
+            "descarte não seria desfazível — espere a tarefa terminar.")
+    abspath, kind, label, mount = resolve_target(con, raw)
+    if kind != "file":
+        raise ValueError("descartar só vale para arquivo, não para pasta")
+    if not keep:
+        raise ValueError("descartar exige dizer qual cópia fica: sem isso não há "
+                         "como garantir que o acervo não fique sem nenhuma")
+    guarda = os.path.abspath(os.path.expanduser(str(keep)))
+    if guarda == os.path.abspath(abspath):
+        raise ValueError("a cópia que fica e a que sai são o mesmo arquivo")
+    if not os.path.isfile(guarda):
+        raise ValueError("a cópia que deveria ficar não está lá: %s. Nada foi "
+                         "movido — descartar agora deixaria o acervo sem nenhuma."
+                         % guarda)
+    if QUAR_NAME in guarda.split(os.sep):
+        raise ValueError("a cópia que deveria ficar já está na quarentena (%s): "
+                         "descartar esta deixaria as duas fora do acervo." % guarda)
+    if _protected(abspath):
+        raise ValueError(
+            "caminho protegido (instalação de launcher): %s. Tirar um arquivo "
+            "solto dali corrompe a instalação, e o launcher rebaixa de qualquer "
+            "forma." % abspath)
+    if _readonly(mount):
+        raise ValueError("o volume está montado somente leitura")
+    if expect:
+        from . import verify as verify_mod
+        atual = verify_mod.full_digest(abspath, nocache=True)
+        if atual != expect:
+            raise ValueError("o arquivo mudou desde a leitura do índice: sha256 "
+                             "é %s, você viu %s" % (atual[:16], expect[:16]))
+    tam = os.path.getsize(abspath)
+    rc, out, moved = do_quarantine(con, abspath, label, mount)
+    con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,output) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (int(time.time()), "discard-clone", abspath, moved,
+                 "discard-clone", rc, out[:8000]))
+    con.commit()
+    return {"ok": rc == 0, "path": abspath, "moved_to": moved, "bytes": tam,
+            "kept": guarda, "output": out, "action": "discard-clone"}
+
+
+def verify_group(con, grp, stage="full"):
+    """Hash one duplicate group on demand and record the verdict.
+
+    Delegates to `verify.verify_groups(only=grp)` instead of hashing here: the
+    rule for "are these the same" has to live in one place, or the panel and the
+    `verify` command are free to disagree about the same group.
+    """
+    ensure_log(con)
+    if not _index_writable(con):
+        raise ValueError(
+            "o índice está travado por outra tarefa (scan, analyze ou verify em "
+            "curso). A verificação precisa gravar o veredito — espere terminar.")
+    from . import verify as verify_mod
+    if stage not in ("quick", "full"):
+        raise ValueError("estágio desconhecido: %s" % stage)
+    # Quem não está mais no disco faz o verify pular o grupo inteiro e devolver
+    # só "inacessível". Dizer QUAIS é o que torna isso acionável: significa que
+    # o índice envelheceu e aquele volume precisa de um scan.
+    sumidos = []
+    for r in con.execute("SELECT file FROM dup_members WHERE grp=?", (grp,)):
+        caminho = verify_mod.abs_path(con, r["file"])
+        if not caminho or not os.path.exists(caminho):
+            sumidos.append(caminho or "arquivo %s" % r["file"])
+    if sumidos:
+        raise ValueError(
+            "%d das cópias não estão mais no disco, então o grupo não pode ser "
+            "conferido: %s%s. O índice é de uma varredura anterior — rode "
+            "'Indexar um volume' e 'Recalcular achados' para ele voltar a "
+            "descrever o disco."
+            % (len(sumidos), "; ".join(sumidos[:3]),
+               "" if len(sumidos) <= 3 else " e outras %d" % (len(sumidos) - 3)))
+    ok_n, mism, skipped = verify_mod.verify_groups(con, stage=stage,
+                                                   progress=False, only=grp)
+    r = con.execute("SELECT verified, copies FROM dup_groups WHERE id=?",
+                    (grp,)).fetchone()
+    return {"ok": skipped == 0, "grp": grp, "verified": r["verified"],
+            "copies": r["copies"], "stage": stage,
+            "output": ("inacessível: alguma cópia não pôde ser lida"
+                       if skipped else
+                       "as %d cópias têm o mesmo sha256" % r["copies"] if ok_n else
+                       "as cópias NÃO são todas iguais")}
+
+
+def discard_group(con, grp, keep):
+    """Quarantine every copy of a group except the one that stays.
+
+    A group has N copies, so acting on it one file at a time is both tedious and
+    the easy way to end up with none. Here the survivor is named once, checked
+    on disk once, and everything else moves.
+
+    Refuses outright when the group is `mismatch`: if the copies are proven to
+    differ, there is no redundancy to remove -- they are distinct files that
+    happen to share a name and a size, and discarding one loses content. That is
+    the one case where the honest answer is "this is not a duplicate group".
+    """
+    ensure_log(con)
+    if not _index_writable(con):
+        raise ValueError(
+            "o índice está travado por outra tarefa (um scan, analyze ou verify "
+            "em curso na aba Tarefas). Sem poder registrar no histórico, o "
+            "descarte não seria desfazível — espere a tarefa terminar.")
+    g = con.execute("SELECT id, name, copies, verified FROM dup_groups WHERE id=?",
+                    (grp,)).fetchone()
+    if not g:
+        raise ValueError("grupo %s não existe" % grp)
+    if g["verified"] == "mismatch":
+        raise ValueError(
+            "este grupo está marcado como DIVERGENTE: o hash provou que as "
+            "cópias têm conteúdo diferente. Não há redundância para remover — "
+            "descartar aqui perde conteúdo que não existe em outro lugar.")
+    guarda = os.path.abspath(os.path.expanduser(str(keep or "")))
+    if not keep or not os.path.isfile(guarda):
+        raise ValueError("a cópia que fica tem de existir no disco: %s"
+                         % (guarda or "(não informada)"))
+    membros = []
+    for r in con.execute(
+            "SELECT v.mount, d.relpath, f.name FROM dup_members m "
+            "JOIN files f ON f.id=m.file JOIN dirs d ON d.id=f.dir "
+            "JOIN volumes v ON v.id=f.vol WHERE m.grp=?", (grp,)):
+        if not r["mount"]:
+            continue              # volume desmontado: não dá para agir
+        rel = ("%s/%s" % (r["relpath"], r["name"])) if r["relpath"] else r["name"]
+        membros.append(os.path.abspath(os.path.join(r["mount"], rel)))
+    if guarda not in membros:
+        raise ValueError("a cópia que fica não é membro deste grupo: %s" % guarda)
+    alvos = [m for m in membros if m != guarda]
+    if not alvos:
+        raise ValueError("não sobrou nenhuma cópia para descartar neste grupo")
+
+    feitos, falhas = [], []
+    for p in alvos:
+        try:
+            r = discard_one(con, p, keep=guarda)
+            feitos.append({"path": r["path"], "moved_to": r["moved_to"],
+                           "bytes": r["bytes"]})
+        except ValueError as e:
+            falhas.append({"path": p, "erro": str(e)})
+    return {"ok": not falhas, "grp": grp, "kept": guarda,
+            "descartados": feitos, "falhas": falhas,
+            "bytes": sum(f["bytes"] for f in feitos),
+            "action": "discard-group",
+            "output": "%d de %d cópias para a quarentena; %s liberado%s"
+                      % (len(feitos), len(alvos),
+                         db.human(sum(f["bytes"] for f in feitos)),
+                         "" if not falhas else "; %d recusada(s)" % len(falhas))}
+
+
+def resolve_clone(con, src_raw, dst_raw, expect=None):
+    """Make `dst` identical to `src`, reversibly.
+
+    The only place in diskmap that replaces an existing file, so it carries by
+    hand the rails the rest of the codebase gets by never writing at all:
+
+      1. both sides must be in the index and outside any launcher's install;
+      2. the file being replaced is QUARANTINED first, never clobbered, so the
+         history tab can put it back: removing means Trash or quarantine here,
+         never unlink, and replacing in place is a removal wearing a different
+         hat;
+      3. the new copy is written to a temporary beside the target and only
+         renamed into place after a read-back with F_NOCACHE matches the source.
+         If anything fails, the quarantined original goes back.
+
+    `expect` is the sha256 the caller believed the source had. The index is a
+    photograph and the disk may have moved since: when it no longer matches,
+    nothing is written.
+    """
+    ensure_log(con)
+    # Antes de qualquer coisa destrutiva: se não dá para gravar no action_log,
+    # a substituição não poderia ser desfeita pelo Histórico — e aí ela não deve
+    # acontecer. Um `verify`/`analyze` em curso segura a trava por minutos.
+    if not _index_writable(con):
+        raise ValueError(
+            "o índice está travado por outra tarefa (um scan, analyze ou verify "
+            "em curso na aba Tarefas). Sem poder registrar no histórico, a "
+            "substituição não seria desfazível — espere a tarefa terminar.")
+    src, skind, slabel, smount = resolve_target(con, src_raw)
+    dst, dkind, dlabel, dmount = resolve_target(con, dst_raw)
+    if skind != "file" or dkind != "file":
+        raise ValueError("resolver clone só vale entre dois arquivos")
+    if os.path.abspath(src) == os.path.abspath(dst):
+        raise ValueError("origem e destino são o mesmo arquivo")
+    for p in (src, dst):
+        if _protected(p):
+            raise ValueError(
+                "caminho protegido (instalação de launcher): %s. Apagar ou "
+                "sobrescrever um arquivo solto ali corrompe a instalação, e o "
+                "launcher rebaixa de qualquer forma." % p)
+    if _readonly(dmount):
+        raise ValueError("o volume de destino está montado somente leitura")
+
+    from . import verify as verify_mod
+    sha_src = verify_mod.full_digest(src, nocache=True)
+    if expect and expect != sha_src:
+        raise ValueError("a origem mudou desde a leitura do índice: sha256 é %s, "
+                         "você viu %s" % (sha_src[:16], expect[:16]))
+    tam = os.path.getsize(src)
+
+    quarantined = _move(dst, os.path.join(dmount, QUAR_NAME,
+                                          os.path.relpath(dst, dmount)))
+    tmp = dst + ".diskmap-parcial"
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        with open(src, "rb") as fi, open(tmp, "xb") as fo:
+            while True:
+                b = fi.read(4 << 20)
+                if not b:
+                    break
+                fo.write(b)
+            fo.flush()
+            os.fsync(fo.fileno())
+        st = os.stat(src)
+        os.utime(tmp, (st.st_atime, st.st_mtime))
+        got = verify_mod.full_digest(tmp, nocache=True)
+        if got != sha_src:
+            raise OSError("a cópia saiu diferente da origem (%s != %s)"
+                          % (got[:16], sha_src[:16]))
+        os.rename(tmp, dst)
+    except BaseException as e:
+        if os.path.lexists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        if not os.path.lexists(dst) and os.path.lexists(quarantined):
+            os.rename(quarantined, dst)      # põe o original de volta
+            quarantined = None
+        con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,output) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (int(time.time()), "resolve-clone", dst, quarantined,
+                     "resolve-clone de %s" % src, 1, str(e)[:8000]))
+        con.commit()
+        raise ValueError("não deu para substituir: %s" % e)
+
+    saida = ("substituído por %s (%s bytes, sha256 %s conferido na releitura); "
+             "o anterior está em %s" % (src, tam, sha_src[:16], quarantined))
+    con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,output) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (int(time.time()), "resolve-clone", dst, quarantined,
+                 "resolve-clone de %s" % src, 0, saida))
+    con.commit()
+    return {"ok": True, "path": dst, "source": src, "moved_to": quarantined,
+            "sha256": sha_src, "bytes": tam, "output": saida,
+            "action": "resolve-clone"}
 
 
 def undo(con, log_id):

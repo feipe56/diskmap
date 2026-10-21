@@ -68,6 +68,28 @@ def cmd_plan(a):
     con.close()
 
 
+def cmd_acervo(a):
+    from . import acervo
+    con = db.connect(a.db)
+    feitos, falhou = acervo.enrich(con, cls=a.cls, limit=a.limit,
+                                   refresh=a.refresh, workers=a.workers,
+                                   min_size=a.min_size)
+    st = acervo.stats(con)
+    print()
+    if not st["ffmpeg"]:
+        print("ffmpeg não está instalado: os formatos de vídeo que o QuickLook "
+              "não abre (mkv, avi, wmv, flv, webm) ficam sem miniatura e o "
+              "painel desenha um ícone. Nada mais muda.")
+    for c in st["classes"]:
+        if c["cls"] == "image":
+            continue
+        print("  %-10s %8s arquivos  %8s com miniatura  %s"
+              % (c["cls"], f"{c['n']:,}".replace(",", "."),
+                 f"{c['com'] or 0:,}".replace(",", "."), db.human(c["b"])))
+    con.close()
+    return 0
+
+
 def cmd_images(a):
     from . import images
     con = db.connect(a.db)
@@ -96,6 +118,60 @@ def cmd_images(a):
     con.close()
 
 
+def cmd_forget(a):
+    """Tira do índice um volume que não existe mais (disco formatado ou vendido).
+
+    Isto apaga **linhas do índice**, nunca arquivo. Existe porque índice de
+    disco que já não existe não é só lixo: ele mente. Um grupo de duplicata que
+    contava o disco formatado como a segunda cópia passa a dizer "pode apagar"
+    sobre o que virou cópia única.
+    """
+    con = db.connect(a.db, create=False)
+    try:
+        r = con.execute("SELECT id, label, mount, files, bytes FROM volumes "
+                        "WHERE label=?", (a.label,)).fetchone()
+        if not r:
+            print(f"não existe volume com o rótulo {a.label!r} no índice")
+            return 1
+        vol = r["id"]
+        ainda = bool(r["mount"] and os.path.ismount(r["mount"]))
+        nf = f"{r['files']:,}".replace(",", ".")   # só o número leva separador
+        print(f"{r['label']}: {nf} arquivos, {db.human(r['bytes'])}, "
+              f"montado em {r['mount']}")
+        if ainda and not a.force:
+            print("\nEsse ponto de montagem AINDA tem um volume montado. Se o disco")
+            print("é outro agora (formatado, trocado), rode de novo com --force.")
+            print("Se é o mesmo disco e você só quer reindexar, use:")
+            print(f"  python3 -m diskmap scan {r['mount']!r} --label {a.label} --rescan")
+            return 1
+        if not a.yes:
+            print("\nIsto remove essas linhas do índice. Nenhum arquivo é tocado.")
+            print("Confirme com --yes.")
+            return 1
+
+        cur = con.cursor()
+        fids = "SELECT id FROM files WHERE vol=?"
+        for sql in (f"DELETE FROM file_hash WHERE file IN ({fids})",
+                    f"DELETE FROM image_meta WHERE file IN ({fids})",
+                    f"DELETE FROM img_members WHERE file IN ({fids})",
+                    f"DELETE FROM dup_members WHERE file IN ({fids})",
+                    "DELETE FROM blob_reclaim WHERE vol=?",
+                    "DELETE FROM archive_pairs WHERE vol=?",
+                    "DELETE FROM dir_rollup WHERE vol=?",
+                    "DELETE FROM blobs WHERE vol=?",
+                    "DELETE FROM files WHERE vol=?",
+                    "DELETE FROM dirs WHERE vol=?",
+                    "DELETE FROM scan_state WHERE vol=?",
+                    "DELETE FROM volumes WHERE id=?"):
+            cur.execute(sql, (vol,))
+        con.commit()
+        print(f"\nvolume {a.label} removido do índice.")
+        print("Rode `diskmap analyze` agora: os achados ainda citam o volume que saiu.")
+        return 0
+    finally:
+        con.close()
+
+
 def cmd_health(a):
     from . import health
     con = db.connect(a.db, create=False)
@@ -120,6 +196,59 @@ def cmd_health(a):
         print("passou do limite do fabricante. Para os atributos que avisam antes")
         print(f"(setor realocado, setor pendente, desgaste):  {rep['hint']}")
     return 0
+
+
+def _io_block(r):
+    """Uma janela de I/O em texto. Separada do laço para `--watch` reimprimir."""
+    out = []
+    rate = lambda b: f"{b / 1e6:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    out.append(f"janela de {str(round(r['seconds'],1)).replace('.', ',')} s · lendo {rate(r['total_read'])} MB/s"
+               f" · gravando {rate(r['total_write'])} MB/s")
+    out.append("")
+    out.append(f"{'DISCO':<9}{'VOLUME':<30}{'LER':>12}{'GRAVAR':>12}   MB/s")
+    for d in r["disks"]:
+        if not (d["read"] or d["write"] or d["volumes"]):
+            continue                      # device parado e sem volume indexado
+        barra = "#" * min(28, int((d["read"] + d["write"]) / 2e6))
+        out.append(f"{d['dev']:<9}{(', '.join(d['volumes']) or '-'):<30}"
+                   f"{rate(d['read']):>12}{rate(d['write']):>12}   {barra}")
+    out.append("")
+    out.append(f"{'PID':>7}  {'PROCESSO':<40}{'LER':>12}{'GRAVAR':>12}   VOLUMES ABERTOS")
+    if not r["procs"]:
+        out.append("        nenhum processo seu moveu bytes nesta janela")
+    for p in r["procs"]:
+        nome = p["comm"].rsplit("/", 1)[-1][:40]
+        out.append(f"{p['pid']:>7}  {nome:<40}{rate(p['read']):>12}"
+                   f"{rate(p['write']):>12}   {', '.join(p['volumes']) or '-'}")
+    out.append("")
+    out.append(f"{r['denied']} processos de outro usuário ficam de fora: o kernel só")
+    out.append("deixa ler o contador dos seus. Rode com sudo para incluí-los.")
+    out.append("A coluna de volume vem dos arquivos que o processo tem abertos agora;")
+    out.append("é palpite de onde ele escreve, não prova de onde o byte caiu.")
+    return "\n".join(out)
+
+
+def cmd_io(a):
+    from . import iowatch
+    con = db.connect(a.db, create=False)
+    try:
+        if not a.watch:
+            print(_io_block(iowatch.sample(con, interval=a.interval, top=a.top)))
+            return 0
+        prev = iowatch.snapshot(con)
+        try:
+            while True:
+                import time as _t
+                _t.sleep(a.interval)
+                cur = iowatch.snapshot(con)
+                r = iowatch.rates(prev, cur, con=con, top=a.top)
+                prev = cur
+                print("\033[H\033[2J" + _io_block(r), flush=True)
+        except KeyboardInterrupt:
+            print()
+            return 0
+    finally:
+        con.close()
 
 
 def cmd_wipe(a):
@@ -302,6 +431,34 @@ def main(argv=None):
     s.add_argument("--reclassify", action="store_true",
                    help="refaz só a biblioteca de cada imagem (segundos, sem sips)")
     s.set_defaults(fn=cmd_images)
+
+    s = sub.add_parser("acervo", help="miniatura de vídeo, documento e afins "
+                                     "(QuickLook, e ffmpeg se existir)")
+    s.add_argument("--cls", help="só uma classe: video, doc, audio, archive…")
+    s.add_argument("--limit", type=int, help="processa só os N maiores")
+    s.add_argument("--refresh", action="store_true",
+                   help="refaz o que já foi tentado, inclusive o que falhou")
+    s.add_argument("--workers", type=int, default=6,
+                   help="renderizadores em paralelo (padrão 6)")
+    s.add_argument("--min-size", type=int, default=0,
+                   help="ignora arquivos menores que isto, em bytes")
+    s.set_defaults(fn=cmd_acervo)
+
+    s = sub.add_parser("forget",
+                       help="tira do índice um volume que não existe mais")
+    s.add_argument("label")
+    s.add_argument("--yes", action="store_true", help="confirma")
+    s.add_argument("--force", action="store_true",
+                   help="mesmo que o ponto de montagem ainda tenha algo montado")
+    s.set_defaults(fn=cmd_forget)
+
+    s = sub.add_parser("io", help="quem está lendo e gravando agora, por disco")
+    s.add_argument("--interval", type=float, default=2.0,
+                   help="segundos por janela (padrão 2)")
+    s.add_argument("--top", type=int, default=12, help="quantos processos listar")
+    s.add_argument("--watch", action="store_true",
+                   help="fica repetindo até Ctrl-C")
+    s.set_defaults(fn=cmd_io)
 
     s = sub.add_parser("health", help="SMART e identidade de cada disco físico")
     s.set_defaults(fn=cmd_health)

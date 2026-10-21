@@ -43,6 +43,13 @@ header.top .sub{font-family:var(--mono);font-size:.73rem;color:var(--fg-3)}
 input[type=search]{font-family:var(--mono);font-size:.82rem;padding:7px 11px;border-radius:6px;
   border:1px solid var(--line-2);background:var(--surface);color:var(--fg);width:min(300px,52vw)}
 input[type=search]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* Campo de texto dentro de uma folha. .searchbox é o *contêiner* da busca
+   (display:flex), não o campo: usá-la aqui deixava o input de confirmação sem
+   borda e encolhido, e a folha parecia não ter onde digitar. */
+.textin{font-family:var(--mono);font-size:.82rem;padding:8px 11px;border-radius:6px;
+  border:1px solid var(--line-2);background:var(--surface);color:var(--fg);
+  width:100%;margin-top:6px}
+.textin:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 nav.tabs{display:flex;gap:2px;overflow-x:auto;padding-block:8px;border-bottom:1px solid var(--line);
   position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);z-index:9;scrollbar-width:none}
@@ -114,6 +121,7 @@ td.path .hi{color:var(--fg);font-weight:500}
 code{font-family:var(--mono);font-size:.78rem;background:var(--surface-2);padding:1px 5px;
   border-radius:4px;border:1px solid var(--line);overflow-wrap:anywhere}
 .empty{padding:28px 16px;text-align:center;color:var(--fg-3);font-family:var(--mono);font-size:.8rem}
+.iomut{color:var(--fg-3)}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
 .row label{font-family:var(--mono);font-size:.72rem;color:var(--fg-2)}
 select{font-family:var(--mono);font-size:.78rem;padding:5px 8px;border-radius:5px;
@@ -164,6 +172,7 @@ td.act{text-align:right;white-space:nowrap}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.danger{background:var(--crit);border-color:var(--crit);color:#fff}
 .btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn:disabled{opacity:.42;cursor:not-allowed}
 pre.out{font-family:var(--mono);font-size:.73rem;background:var(--surface-2);
   border:1px solid var(--line);border-radius:6px;padding:11px;overflow-x:auto;
   white-space:pre-wrap;word-break:break-word;max-height:300px;overflow-y:auto;margin:12px 0 0}
@@ -172,6 +181,10 @@ pre.out{font-family:var(--mono);font-size:.73rem;background:var(--surface-2);
 .warnbox{border-left:3px solid var(--warn);background:color-mix(in oklab,var(--warn) 7%,transparent);
   padding:10px 12px;border-radius:0 6px 6px 0;font-size:.81rem;color:var(--fg-2);margin:12px 0 0}
 .warnbox.crit{border-left-color:var(--crit);background:color-mix(in oklab,var(--crit) 7%,transparent)}
+/* Boa notícia não pode parecer alerta: 'os dois são idênticos por sha256'
+   é confirmação, e sair na mesma caixa âmbar do 'ninguém conferiu' ensina
+   o olho a ignorar as duas. */
+.warnbox.ok{border-left-color:var(--ok);background:color-mix(in oklab,var(--ok) 7%,transparent)}
 #toasts{position:fixed;bottom:16px;right:16px;z-index:70;display:flex;flex-direction:column;
   gap:7px;max-width:min(400px,86vw)}
 .toast{background:var(--fg);color:var(--bg);font-size:.8rem;padding:10px 13px;border-radius:7px;
@@ -290,3 +303,118 @@ figure.sh .box .px{position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,
   overflow-wrap:anywhere}
 .viewer .meta .row2{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;
   font-family:var(--mono);font-size:.72rem;color:var(--fg-3)}
+
+/* Árvores clonadas: o número de arquivos iguais é um botão, e a seta gira ao
+   abrir. A rotação lê de aria-expanded, que é o mesmo estado que o leitor de
+   tela usa — um estado só, não dois que podem divergir. */
+.twigcell{padding:4px 8px}
+.twig{font-family:var(--mono);font-size:.78rem;font-variant-numeric:tabular-nums;
+  display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:5px;
+  background:transparent;border:1px solid transparent;color:var(--fg);cursor:pointer}
+.twig:hover{background:var(--surface-2);border-color:var(--line)}
+.twig:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.twig .arrow{display:inline-block;color:var(--fg-2);font-size:.82rem;line-height:1;
+  transition:transform .15s ease}
+.twig[aria-expanded="true"]{background:var(--surface-2);border-color:var(--line)}
+.twig[aria-expanded="true"] .arrow{transform:rotate(90deg);color:var(--accent)}
+tr.det>td{background:var(--surface-2);padding:0}
+.twigbox{padding:14px 16px 16px}
+.twigbox .note{margin-top:0;margin-bottom:12px}
+.twigbox .tw{background:var(--surface)}
+.twigbox table{font-size:.78rem}
+/* O nome é a coluna que identifica a linha: sem um piso ela se espreme em
+   quatro linhas enquanto as de caminho sobram espaço. */
+.twigbox td:first-child,.twigbox th:first-child{min-width:19ch}
+
+/* Escolha de direção do "resolver clone": qual lado sobrevive. Os dois botões
+   dizem o que será SUBSTITUÍDO, não o que será mantido — a frase que importa
+   é a da perda. */
+.dirpick{display:grid;gap:8px;margin:14px 0}
+.dirbtn{display:flex;flex-direction:column;gap:2px;text-align:left;cursor:pointer;
+  padding:9px 12px;border-radius:7px;border:1px solid var(--line);background:var(--surface)}
+.dirbtn:hover{border-color:var(--accent)}
+.dirbtn.on{border-color:var(--accent);background:color-mix(in oklab,var(--accent) 10%,transparent)}
+.dirbtn .an{font-family:var(--mono);font-size:.78rem;color:var(--fg)}
+.dirbtn .ah{font-size:.7rem;color:var(--fg-3)}
+.dirbtn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* Acervo: sub-abas e a grade de cartões. A miniatura e o ícone ocupam a mesma
+   caixa de propósito — trocar o tamanho conforme houver ou não preview faria a
+   grade pular ao filtrar. */
+.subtabs{display:flex;gap:4px;margin:16px 0 14px;flex-wrap:wrap}
+.subtabs button{font-family:var(--mono);font-size:.76rem;padding:6px 13px;
+  border-radius:7px;border:1px solid var(--line);background:var(--surface);
+  color:var(--fg-2);cursor:pointer}
+.subtabs button:hover{border-color:var(--accent)}
+.subtabs button[aria-selected="true"]{background:var(--accent);border-color:var(--accent);
+  color:#fff}
+.subtabs button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.grade{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px;
+  margin-top:14px}
+.cart{margin:0;border:1px solid var(--line);border-radius:9px;background:var(--surface);
+  overflow:hidden;display:flex;flex-direction:column;position:relative}
+.cart-img{aspect-ratio:4/3;background:var(--surface-2);display:flex;align-items:center;
+  justify-content:center;overflow:hidden}
+.cart-img img{width:100%;height:100%;object-fit:cover;display:block}
+.ficon{width:56px;height:56px}
+.cart figcaption{padding:8px 10px 10px;display:flex;flex-direction:column;gap:2px}
+.cart-nome{font-family:var(--mono);font-size:.7rem;color:var(--fg);line-height:1.35;
+  overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden}
+.cart-meta{font-family:var(--mono);font-size:.63rem;color:var(--fg-3)}
+.cart .actbtn{position:absolute;top:6px;right:6px;background:var(--surface);
+  opacity:0;transition:opacity .12s}
+.cart:hover .actbtn,.cart .actbtn:focus-visible{opacity:1}
+/* "na fila" só aparece em quem PODE ganhar miniatura: um .rtf sem renderizador
+   com esse selo seria uma promessa que nunca se cumpre. */
+.cart-img{position:relative}
+.pend{position:absolute;bottom:6px;left:6px;font-family:var(--mono);font-size:.58rem;
+  padding:1px 6px;border-radius:999px;background:var(--surface);color:var(--fg-3);
+  border:1px solid var(--line)}
+
+/* Etiquetas como balões: entram no filtro com um clique e saem pelo ×. O que
+   está filtrando fica cheio, o que está disponível fica vazado — a diferença
+   tem de ser legível antes de ler o texto. */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);
+  font-size:.72rem;padding:3px 10px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--line);background:var(--surface);color:var(--fg-2)}
+.chip:hover{border-color:var(--accent);color:var(--fg)}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff;cursor:default}
+.chip button{all:unset;cursor:pointer;font-size:.9rem;line-height:1;opacity:.85;
+  padding:0 1px}
+.chip button:hover{opacity:1}
+.chip button:focus-visible,.chip:focus-visible{outline:2px solid var(--accent);
+  outline-offset:2px}
+.tagbox{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.tagtit{font-family:var(--mono);font-size:.64rem;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--fg-3);margin-bottom:8px}
+/* Herdada de uma pasta não tem × : tirar ali seria mentira, porque quem manda
+   é a etiqueta da pasta. O tom mais apagado diz isso antes do title. */
+.chip.on.herd{background:color-mix(in oklab,var(--accent) 35%,transparent);
+  border-color:transparent}
+/* O cabeçalho da busca passa a ter uma ação à direita. */
+.phead-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+  flex-wrap:wrap}
+.phead-row>div{flex:1;min-width:min(100%,320px)}
+.subtabs .cnt{font-size:.66rem;opacity:.75;margin-left:4px}
+/* Segunda camada: as filhas da etiqueta ativa. Recuada e menor, para a
+   hierarquia se ler antes do texto. */
+.chips.sub{margin:2px 0 0 14px;padding-left:12px;border-left:2px solid var(--line)}
+.chips.sub .chip{font-size:.68rem;padding:2px 9px}
+.subde{font-family:var(--mono);font-size:.62rem;color:var(--fg-3);align-self:center;
+  margin-right:2px}
+
+/* Barra de seleção: fica no fluxo, não flutuando. Barra flutuante some atrás de
+   teclado em tela pequena e tapa justamente a última linha da lista. */
+.selbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:14px 0 4px;
+  padding:10px 12px;border-radius:9px;border:1px solid var(--accent);
+  background:color-mix(in oklab,var(--accent) 8%,transparent);font-size:.8rem}
+.selbar .textin{width:180px}
+.selhint{font-size:.72rem;color:var(--fg-3)}
+.selbox{position:absolute;top:7px;left:7px;z-index:2;accent-color:var(--accent);
+  width:16px;height:16px;cursor:pointer}
+.cart.sel{outline:2px solid var(--accent);outline-offset:-2px}
+/* O cartão da galeria precisa de posição para a caixa ancorar nele. */
+.sh{position:relative}
+.sh.sel{outline:2px solid var(--accent);outline-offset:-2px}

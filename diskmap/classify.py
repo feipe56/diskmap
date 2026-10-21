@@ -72,6 +72,13 @@ SKIP_DIRS = {
     "Config.Msi", "MATS", "PerfLogs", "OneDriveTemp", "Recovery",
     ".Spotlight-V100", ".fseventsd", ".TemporaryItems", ".Trashes",
     ".DocumentRevisions-V100", ".fcpcache",
+    # The quarantine is where this tool puts what is on its way out. Indexing it
+    # would make the panel keep reporting a file as a duplicate after it was
+    # quarantined to resolve that very duplicate -- the dedup would be invisible
+    # to the tool that performed it. Same reason `.Trashes` is here. Kept as a
+    # literal because `actions` imports this module, not the other way round;
+    # `tests/test_classify.py` asserts the two never drift apart.
+    ".diskmap-quarantine",
 }
 
 

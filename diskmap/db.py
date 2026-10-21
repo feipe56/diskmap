@@ -154,6 +154,11 @@ def connect(path=DEFAULT_DB, create=True):
         os.makedirs(d, exist_ok=True)
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
+    # Esperar pela trava em vez de falhar na hora. O servidor atende em threads
+    # e `executescript(SCHEMA)` pega trava de escrita em TODA conexão (o
+    # `IF NOT EXISTS` é idempotente, mas ainda é DDL), então duas requisições
+    # simultâneas davam "database is locked" sem nem tentar.
+    con.execute("PRAGMA busy_timeout=10000")
     con.executescript(SCHEMA)
     return con
 

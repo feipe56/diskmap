@@ -18,7 +18,7 @@ NAME_OK = re.compile(r"^[A-Za-z0-9._-]{1,60}$")
 
 # Jobs that write to the index. Only one runs at a time, so they never fight over
 # the database; read-only jobs are unrestricted.
-EXCLUSIVE = {"scan", "import", "analyze", "verify", "images"}
+EXCLUSIVE = {"scan", "import", "analyze", "verify", "images", "acervo"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS job_log (
@@ -140,6 +140,25 @@ class Runner:
                 argv += ["--min-size", str(int(p["min_size"]))]
             if p.get("unverified"):
                 argv.append("--unverified")
+            return argv
+
+        if kind == "acervo":
+            argv = base + ["acervo"]
+            c = str(p.get("cls") or "")
+            if c:
+                # lista fechada: `cls` entra num argv, e argv montado a partir
+                # do navegador é como se ganha execução arbitrária
+                if c not in ("video", "doc", "audio", "archive", "code",
+                             "model3d", "binary", "gamedata", "ml_model", "db"):
+                    raise ValueError("classe desconhecida: %s" % c)
+                argv += ["--cls", c]
+            lim = int(p.get("limit") or 0)
+            if lim:
+                if not 1 <= lim <= 1_000_000:
+                    raise ValueError("limite fora de 1..1000000")
+                argv += ["--limit", str(lim)]
+            if p.get("refresh"):
+                argv += ["--refresh"]
             return argv
 
         if kind == "images":

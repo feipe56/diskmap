@@ -12,6 +12,11 @@ YEAR = 365 * 86400
 AGE_BUCKETS = [(0.5, "<6m"), (1, "6m-1a"), (2, "1-2a"), (3, "2-3a"), (5, "3-5a")]
 MIN_DUP_SIZE = 1_000_000       # ignore small-file noise
 MIN_FP_SIZE = 65_536           # tree fingerprint floor
+# A fingerprint in more trees than this is boilerplate (a README, an installer
+# stub), not evidence of a cloned tree: it would pair every tree with every
+# other. Named because `overlap_files` has to apply the very same cut, or the
+# file list would show more rows than the table's own count promises.
+MAX_FP_TREES = 12
 MIN_JUNK_SIZE = 1_000_000
 MIN_OVERLAP = 500_000_000      # only report tree pairs sharing this much
 BLOB_STALE_YEARS = 1           # an aggregated dir is only waste once the
@@ -59,6 +64,24 @@ def keep_score(rel):
     return (0 if any(k in low for k in prot) else 1,
             1 if any(k in low for k in drop) else 0,
             low.count("/"), len(low))
+
+
+def keep_reason(rel):
+    """Why `keep_score` ranks this path where it does, in words.
+
+    The panel offers a default survivor; offering it without saying why turns a
+    rule into an oracle, and an oracle is something people either obey blindly
+    or ignore entirely.
+    """
+    prot, drop = _lists()
+    low = rel.lower()
+    for k in prot:
+        if k in low:
+            return "caminho protegido (%s): nunca sai" % k
+    for k in drop:
+        if k in low:
+            return "está em %s: primeiro a sair" % k
+    return "caminho mais curto e mais raso"
 
 
 def _age(mtime, now):
@@ -187,6 +210,151 @@ def rederive_verification(con):
     return len(updates)
 
 
+def _like_prefix(p):
+    """Escape a relpath so it can be used as a LIKE prefix: paths do contain
+    `%` and `_`, and without escaping they would match the wrong subtrees."""
+    return p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
+
+
+def split_tree(con, label):
+    """'<volume>/a/b' -> (vol_id, 'a/b'), or None.
+
+    The volume label is matched by the longest one that fits, because nothing
+    stops a label from containing a slash. '(raiz)' maps to the volume root,
+    which is the one case `tree_label` spells out instead of using a prefix.
+    """
+    best = None
+    for r in con.execute("SELECT id, label FROM volumes"):
+        lab = r["label"]
+        if label == lab or label.startswith(lab + "/"):
+            if best is None or len(lab) > len(best[1]):
+                best = (r["id"], lab)
+    if best is None:
+        return None
+    rest = label[len(best[1]):].lstrip("/")
+    return (best[0], "" if rest == "(raiz)" else rest)
+
+
+def _tree_files(con, vol, prefix):
+    """Every file of one tree that is big enough to carry a fingerprint."""
+    if prefix:
+        q = ("SELECT f.id, d.relpath, f.name, f.size, f.cls, f.mtime FROM files f "
+             "JOIN dirs d ON d.id=f.dir WHERE f.vol=? AND f.size>=? "
+             "AND (d.relpath=? OR d.relpath LIKE ? ESCAPE '\\')")
+        args = (vol, MIN_FP_SIZE, prefix, _like_prefix(prefix))
+    else:
+        # '(raiz)' is only the files sitting at the volume root, not the whole
+        # volume -- that is what `tree_label` means by it.
+        q = ("SELECT f.id, d.relpath, f.name, f.size, f.cls, f.mtime FROM files f "
+             "JOIN dirs d ON d.id=f.dir WHERE f.vol=? AND f.size>=? AND d.relpath=''")
+        args = (vol, MIN_FP_SIZE)
+    out = collections.defaultdict(list)
+    for r in con.execute(q, args):
+        out[(r["name"].lower(), r["size"])].append(dict(r))
+    return out
+
+
+def _fp_tree_count(con, fps, depth):
+    """How many trees each fingerprint lives in, volume-wide.
+
+    This is the `MAX_FP_TREES` cut, and it cannot be skipped: without it the
+    listing would include fingerprints that `tree_overlap` deliberately threw
+    away, and show more files than the row says. Queried by size -- `files_size`
+    is an index and the shared sizes are few -- then filtered by name in Python.
+    """
+    vols = _volumes(con)
+    sizes = sorted({sz for _n, sz in fps})
+    trees = collections.defaultdict(set)
+    want = set(fps)
+    for i in range(0, len(sizes), 400):
+        lote = sizes[i:i + 400]
+        q = ("SELECT f.vol, d.relpath, f.name, f.size FROM files f "
+             "JOIN dirs d ON d.id=f.dir WHERE f.size IN (%s)"
+             % ",".join("?" * len(lote)))
+        for r in con.execute(q, lote):
+            k = (r["name"].lower(), r["size"])
+            if k in want:
+                trees[k].add(tree_label(vols, r["vol"], r["relpath"], depth))
+    return trees
+
+
+def _verdicts(con, ids):
+    """sha256 verdict per file id, from whatever `verify` has already done."""
+    out = {}
+    ids = list(ids)
+    for i in range(0, len(ids), 500):
+        lote = ids[i:i + 500]
+        q = ("SELECT file, quick, full FROM file_hash WHERE file IN (%s)"
+             % ",".join("?" * len(lote)))
+        for r in con.execute(q, lote):
+            out[r["file"]] = (r["quick"], r["full"])
+    return out
+
+
+def _verdict(ha, hb):
+    """'full' | 'quick' | 'mismatch' | 'no' for one pair of files.
+
+    Same name and same size is a candidate, never proof: fixed-layout formats
+    (model weights, disk images, containers) routinely share both without
+    sharing content. So the listing says which pairs are actually proven and
+    which are only plausible.
+    """
+    if not ha or not hb:
+        return "no"
+    qa, fa = ha
+    qb, fb = hb
+    if fa and fb:
+        return "full" if fa == fb else "mismatch"
+    if qa and qb:
+        return "quick" if qa == qb else "mismatch"
+    return "no"
+
+
+def overlap_files(con, a, b, limit=400):
+    """The files that back one pair of cloned trees.
+
+    The aggregate in `tree_overlap` says "these two folders hold 23.6 GB of the
+    same content". This answers the question that actually decides anything:
+    WHICH files, and are they really the same?
+
+    Same fingerprint as the aggregate -- lowercase name + exact size, above
+    MIN_FP_SIZE, living in at most MAX_FP_TREES trees -- so the count here
+    matches the count in the table.
+    """
+    sa, sb = split_tree(con, a), split_tree(con, b)
+    if sa is None or sb is None:
+        return {"a": a, "b": b, "total": 0, "bytes": 0, "rows": [],
+                "erro": "árvore não encontrada no índice"}
+    # The depth is whatever the analyze run used, and the labels carry it: the
+    # remainder after the volume label IS the prefix. Derived, never guessed.
+    depth = max(len(sa[1].split("/")) if sa[1] else 0,
+                len(sb[1].split("/")) if sb[1] else 0)
+    fa = _tree_files(con, sa[0], sa[1])
+    fb = _tree_files(con, sb[0], sb[1])
+    shared = set(fa) & set(fb)
+    if shared:
+        trees = _fp_tree_count(con, shared, depth)
+        shared = {k for k in shared if 2 <= len(trees.get(k, ())) <= MAX_FP_TREES}
+    total = len(shared)
+    bytes_ = sum(sz for _n, sz in shared)
+    ordem = sorted(shared, key=lambda k: (-k[1], k[0]))[:limit]
+    ids = [x["id"] for k in ordem for x in fa[k] + fb[k]]
+    hs = _verdicts(con, ids)
+    rows = []
+    for k in ordem:
+        ra, rb = fa[k][0], fb[k][0]
+        rows.append({
+            "name": ra["name"], "size": k[1], "cls": ra["cls"],
+            "mtime_a": ra["mtime"], "mtime_b": rb["mtime"],
+            "a_path": ("%s/%s" % (ra["relpath"], ra["name"])).lstrip("/"),
+            "b_path": ("%s/%s" % (rb["relpath"], rb["name"])).lstrip("/"),
+            "a_extra": len(fa[k]) - 1, "b_extra": len(fb[k]) - 1,
+            "verdict": _verdict(hs.get(ra["id"]), hs.get(rb["id"])),
+        })
+    return {"a": a, "b": b, "a_label": a.split("/")[0], "b_label": b.split("/")[0],
+            "total": total, "bytes": bytes_, "shown": len(rows), "rows": rows}
+
+
 def archive_pairs(con, verbose=True):
     """An archive sitting next to a directory of the same name."""
     con.execute("DELETE FROM archive_pairs")
@@ -212,6 +380,24 @@ def archive_pairs(con, verbose=True):
     return waste
 
 
+def tree_label(vols, vol, rel, depth):
+    """A file's tree label: <volume>/<first `depth` path components>.
+
+    Module level on purpose: `tree_overlap` produces the aggregate and
+    `overlap_files` has to reproduce the exact same grouping to list what backs
+    it. Two implementations of one path rule drift apart, and then the count
+    and the listing disagree with nobody able to say which is right.
+    """
+    parts = rel.split("/") if rel else []
+    if not parts:
+        return vols[vol] + "/(raiz)"
+    return vols[vol] + "/" + "/".join(parts[:depth])
+
+
+def _volumes(con):
+    return {r["id"]: r["label"] for r in con.execute("SELECT id, label FROM volumes")}
+
+
 def tree_overlap(con, depth=2, verbose=True):
     """Find directory trees that hold the same content under different names.
 
@@ -220,11 +406,10 @@ def tree_overlap(con, depth=2, verbose=True):
     """
     con.execute("DELETE FROM tree_overlap")
     dmap = paths(con)
-    vols = {r["id"]: r["label"] for r in con.execute("SELECT id, label FROM volumes")}
+    vols = _volumes(con)
 
     def tree_of(vol, rel):
-        parts = rel.split("/") if rel else []
-        return vols[vol] + "/" + "/".join(parts[:depth]) if parts else vols[vol] + "/(raiz)"
+        return tree_label(vols, vol, rel, depth)
 
     tb = collections.Counter()
     fp = collections.defaultdict(set)
@@ -236,7 +421,7 @@ def tree_overlap(con, depth=2, verbose=True):
 
     pair = collections.Counter(); pairn = collections.Counter()
     for (name, size), trees in fp.items():
-        if not 2 <= len(trees) <= 12:
+        if not 2 <= len(trees) <= MAX_FP_TREES:
             continue
         ts = sorted(trees)
         for i in range(len(ts)):

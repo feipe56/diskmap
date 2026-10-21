@@ -4,7 +4,7 @@
 Never opens a file; stats only. Resumable per root: a root that finished is
 recorded in scan_state, so re-running skips it unless --rescan is passed.
 """
-import os, sys, time
+import os, sqlite3, sys, time
 from . import db
 from .classify import BLOB_DIRS, SKIP_DIRS, classify
 
@@ -38,6 +38,24 @@ def scan_volume(con, mount, label, roots=None, rescan=False, progress=True,
     vol = db.volume_id(con, label, mount=mount, capacity=cap, free=free,
                        scanned_at=int(time.time()))
     if rescan:
+        # Everything keyed by file id has to go with the files, and the reason
+        # is sharper than tidiness: `files.id` is an INTEGER PRIMARY KEY, so
+        # after a DELETE SQLite hands the freed rowids back out in walk order.
+        # Keep the old rows and the sha256 computed for one file silently
+        # becomes the sha256 of whichever file lands on that id -- and the panel
+        # would then show "hash completo" for a pair nobody ever hashed. Losing
+        # the hashing work is bad; attaching it to the wrong file is worse,
+        # because it looks like proof.
+        #
+        # Tags survive, because they are keyed by path and not by id. That is
+        # the only reason they can: user-authored data is the one thing here
+        # that no amount of rescanning can recompute.
+        for _t in ("file_hash", "image_meta", "media_meta"):
+            try:
+                con.execute("DELETE FROM %s WHERE file IN "
+                            "(SELECT id FROM files WHERE vol=?)" % _t, (vol,))
+            except sqlite3.OperationalError:
+                pass              # tabela ainda não existe neste índice
         con.execute("DELETE FROM files WHERE vol=?", (vol,))
         con.execute("DELETE FROM dirs WHERE vol=?", (vol,))
         con.execute("DELETE FROM blobs WHERE vol=?", (vol,))

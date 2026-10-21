@@ -6,9 +6,10 @@ Two stages, because hashing 300 GB to answer a question you can answer with
 reads everything. A group that disagrees at either stage is marked mismatch
 and dropped from the recoverable set.
 """
-import hashlib, os, sys, time
+import fcntl, hashlib, os, sys, time
 from . import db
 
+F_NOCACHE = 48            # macOS fcntl: bypass the buffer cache
 HEAD = TAIL = 32768
 
 
@@ -23,9 +24,21 @@ def quick_digest(path, size):
     return h.hexdigest()
 
 
-def full_digest(path, chunk=4 << 20):
+def full_digest(path, chunk=4 << 20, nocache=False):
+    """sha256 of the whole file.
+
+    `nocache` bypasses the page cache (macOS F_NOCACHE). It matters when the
+    read is meant to confirm what actually landed on the platter: right after a
+    write, a normal read is served from the buffer that was just written, so the
+    check would be comparing the write to itself and always pass.
+    """
     h = hashlib.sha256()
     with open(path, "rb") as fh:
+        if nocache:
+            try:
+                fcntl.fcntl(fh.fileno(), F_NOCACHE, 1)
+            except OSError:
+                pass              # not macOS, or the fs refuses: still correct
         while True:
             b = fh.read(chunk)
             if not b:
@@ -45,11 +58,25 @@ def abs_path(con, file_id, _cache={}):
     return os.path.join(r["mount"], rel)
 
 
-def verify_groups(con, stage="quick", limit=None, min_size=0, progress=True):
-    """Hash every member of each unverified duplicate group."""
-    q = ("SELECT id, size, copies, wasted FROM dup_groups "
-         "WHERE verified IN ('no','quick') AND size >= ? ORDER BY wasted DESC")
-    rows = [dict(r) for r in con.execute(q, (min_size,))]
+def verify_groups(con, stage="quick", limit=None, min_size=0, progress=True,
+                  only=None):
+    """Hash every member of each unverified duplicate group.
+
+    `only` restricts the run to one group id, which is how the panel verifies a
+    single group on demand. Same code path on purpose: a second implementation
+    of "hash the members and decide" would be free to disagree with this one.
+    It also ignores the `verified` filter, because asking to re-check a group
+    that already has a verdict is a legitimate thing to ask for.
+    """
+    if only is not None:
+        q = "SELECT id, size, copies, wasted FROM dup_groups WHERE id = ?"
+        rows = [dict(r) for r in con.execute(q, (only,))]
+        if not rows:
+            raise ValueError("grupo %s não existe" % only)
+    else:
+        q = ("SELECT id, size, copies, wasted FROM dup_groups "
+             "WHERE verified IN ('no','quick') AND size >= ? ORDER BY wasted DESC")
+        rows = [dict(r) for r in con.execute(q, (min_size,))]
     if stage == "full":
         rows = [r for r in rows if True]
     if limit:

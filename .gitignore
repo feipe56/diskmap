@@ -9,3 +9,9 @@ diskmap-plan/
 # Memória do projeto: contexto da *minha* máquina (labels de volume, caminhos,
 # números dos meus discos). Fica local de propósito.
 CLAUDE.md
+
+# Plano de migração: cita os discos e pastas desta máquina. Local de propósito.
+PLANO-DISCOS.md
+
+# Scripts da migração: citam caminhos dos meus discos. Local de propósito.
+migracao/
