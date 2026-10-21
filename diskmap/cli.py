@@ -14,6 +14,17 @@ def cmd_scan(a):
     con.close()
 
 
+def cmd_reconciliar(a):
+    from .reconciliar import reconciliar
+    con = db.connect(a.db)
+    label = a.label or os.path.basename(a.mount.rstrip("/")).replace(" ", "_")
+    reconciliar(con, a.mount, label, raizes=tuple(a.root or [""]),
+                exclude=tuple(a.exclude or ()), aplicar_=a.aplicar)
+    if a.aplicar:
+        db.build_indexes(con)
+    con.close()
+
+
 def cmd_import(a):
     from .importtsv import import_tsv
     con = db.connect(a.db)
@@ -423,6 +434,17 @@ def main(argv=None):
     s.add_argument("--exclude", action="append", help="nome de pasta a ignorar")
     s.add_argument("--rescan", action="store_true", help="descarta o índice do volume")
     s.set_defaults(fn=cmd_scan)
+
+    s = sub.add_parser("reconciliar",
+                       help="o que sumiu, apareceu ou mudou desde a varredura "
+                            "(ensaio; mantém miniatura e hash do que não mudou)")
+    s.add_argument("mount")
+    s.add_argument("--label")
+    s.add_argument("--root", action="append", help="limita a estas subpastas")
+    s.add_argument("--exclude", action="append", help="nome de pasta a ignorar")
+    s.add_argument("--aplicar", action="store_true",
+                   help="escreve no índice; sem isto é só ensaio")
+    s.set_defaults(fn=cmd_reconciliar)
 
     s = sub.add_parser("import", help="importa um índice TSV já existente")
     s.add_argument("tsv")

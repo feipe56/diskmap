@@ -32,6 +32,49 @@ def volume_stats(mount):
         return None, None
 
 
+def caminhar(con, mount, vol, root_rel, exclude=(), blobs=True):
+    """Percorre uma raiz e emite (relpath_da_pasta, nome, size, mtime, ext, cls).
+
+    É A definição de "o que entra no índice": quais pastas são puladas, quais
+    viram agregado, e como a extensão e a classe saem do nome. `scan_volume` e
+    `reconciliar` caminham por aqui os dois, porque duas cópias desta regra
+    divergem -- e aí o reconciliador reporta como "apareceu" tudo que a outra
+    cópia resolveu pular.
+
+    `blobs=False` não grava os agregados: quem só quer comparar não deve
+    escrever nada.
+    """
+    excl = set(exclude)
+    start = os.path.join(mount, root_rel) if root_rel else mount
+    if not os.path.isdir(start):
+        return
+    for cur_root, dirs, files in os.walk(start, onerror=lambda e: None):
+        keep = []
+        for d in dirs:
+            if d in SKIP_DIRS or d in excl:
+                continue
+            if d in BLOB_DIRS:
+                if blobs:
+                    full = os.path.join(cur_root, d)
+                    b, c = _blob_totals(full)
+                    con.execute(
+                        "INSERT INTO blobs (vol, relpath, kind, bytes, files) "
+                        "VALUES (?,?,?,?,?)",
+                        (vol, os.path.relpath(full, mount), d, b, c))
+                continue
+            keep.append(d)
+        dirs[:] = keep
+        rel = os.path.relpath(cur_root, mount)
+        rel = "" if rel == "." else rel
+        for f in files:
+            try:
+                st = os.lstat(os.path.join(cur_root, f))
+            except OSError:
+                continue
+            ext = os.path.splitext(f)[1].lower().lstrip(".")[:12]
+            yield (rel, f, st.st_size, int(st.st_mtime), ext, classify(ext))
+
+
 def scan_volume(con, mount, label, roots=None, rescan=False, progress=True,
                 exclude=()):
     cap, free = volume_stats(mount)
@@ -65,7 +108,6 @@ def scan_volume(con, mount, label, roots=None, rescan=False, progress=True,
     done = {r["root"] for r in con.execute(
         "SELECT root FROM scan_state WHERE vol=? AND done_at IS NOT NULL", (vol,))}
     targets = list(roots) if roots else [""]
-    excl = set(exclude)
 
     dir_cache = {r["relpath"]: r["id"] for r in con.execute(
         "SELECT relpath, id FROM dirs WHERE vol=?", (vol,))}
@@ -91,33 +133,11 @@ def scan_volume(con, mount, label, roots=None, rescan=False, progress=True,
             print(f"  [{label}] raiz ausente: {root_rel}", file=sys.stderr)
             continue
         pending = []
-        for cur_root, dirs, files in os.walk(start, onerror=lambda e: None):
-            keep = []
-            for d in dirs:
-                if d in SKIP_DIRS or d in excl:
-                    continue
-                if d in BLOB_DIRS:
-                    full = os.path.join(cur_root, d)
-                    b, c = _blob_totals(full)
-                    con.execute(
-                        "INSERT INTO blobs (vol, relpath, kind, bytes, files) VALUES (?,?,?,?,?)",
-                        (vol, os.path.relpath(full, mount), d, b, c))
-                    continue
-                keep.append(d)
-            dirs[:] = keep
-
-            rel = os.path.relpath(cur_root, mount)
-            rel = "" if rel == "." else rel
+        for rel, f, tam, mt, ext, cls in caminhar(con, mount, vol, root_rel,
+                                                  exclude):
             did = dir_id(rel, rel.count("/") + 1 if rel else 0)
-            for f in files:
-                try:
-                    st = os.lstat(os.path.join(cur_root, f))
-                except OSError:
-                    continue
-                ext = os.path.splitext(f)[1].lower().lstrip(".")[:12]
-                pending.append((vol, did, f, st.st_size, int(st.st_mtime), ext,
-                                classify(ext)))
-                total_files += 1
+            pending.append((vol, did, f, tam, mt, ext, cls))
+            total_files += 1
             if len(pending) >= BATCH:
                 con.executemany(
                     "INSERT INTO files (vol,dir,name,size,mtime,ext,cls) VALUES (?,?,?,?,?,?,?)",

@@ -50,6 +50,9 @@ python3 -m diskmap import caminho/para/index.tsv
 # calcular achados (duplicata, árvore clonada, build/dep parado)
 python3 -m diskmap analyze
 
+# o que mudou no disco desde a varredura (ensaio)
+python3 -m diskmap reconciliar /Volumes/DISCO
+
 # miniaturas
 python3 -m diskmap images         # imagens: miniatura, dimensão, hash visual, biblioteca
 python3 -m diskmap acervo --cls video   # vídeo, documento e afins
@@ -409,6 +412,32 @@ python3 -m diskmap acervo --limit 500        # começa pelos maiores
 ```
 
 ## O que ele encontra que um buscador de duplicata não encontra
+
+### Reconciliar em vez de reindexar
+
+`scan` sabe acrescentar, não sabe reconciliar: o laço dele só faz `INSERT`, não
+remove o que sumiu, e uma raiz já concluída é pulada. A única saída era
+`--rescan`, que descarta o índice do volume — e com ele `image_meta`,
+`media_meta`, `file_hash` e `audio_meta` daquele volume, porque `files.id` é
+`INTEGER PRIMARY KEY` e o rowid liberado volta a ser distribuído. Num acervo já
+processado isso custa horas de miniatura para corrigir algumas dezenas de
+linhas.
+
+`reconciliar` compara por **caminho**, não por id, e é isso que permite guardar
+o trabalho:
+
+| caso | o id | a miniatura e o hash |
+|---|---|---|
+| não mudou | fica | **ficam** |
+| mudou (tamanho ou mtime) | fica | saem — descrevem o conteúdo velho |
+| sumiu | sai | saem |
+| apareceu | novo | não existem, e é o certo |
+
+Hash desatualizado é pior que hash nenhum: parece prova. Etiqueta nunca é
+tocada — ela é por caminho, e é o único dado aqui que varredura nenhuma
+recomputa.
+
+Ensaio é o padrão; só escreve com `--aplicar`.
 
 **Árvores clonadas.** Ferramenta de duplicata acha arquivo repetido. Ela não te diz
 que a pasta de build de um projeto seu e a instalação que o Steam mantém são 96% a

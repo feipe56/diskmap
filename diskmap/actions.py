@@ -121,6 +121,19 @@ def fora_do_lugar(con):
     return fora
 
 
+def quem_ficou(argv):
+    """O caminho da cópia que ficou, se o diário registrou.
+
+    Linhas gravadas antes desta informação existir devolvem None, e quem lê tem
+    de tratar isso como "não sei" em vez de "não havia" -- são coisas
+    diferentes, e confundi-las é o tipo de erro que esvazia uma quarentena.
+    """
+    marca = "fica="
+    if not argv or marca not in argv:
+        return None
+    return argv.split(marca, 1)[1].strip() or None
+
+
 def estado_no_disco(abspath, fora, raiz=None, _mem=None):
     """'ok' | 'quarentena' | 'lixeira' | 'sumido' | 'desmontado'.
 
@@ -513,10 +526,14 @@ def discard_one(con, raw, keep=None, expect=None):
                              "é %s, você viu %s" % (atual[:16], expect[:16]))
     tam = os.path.getsize(abspath)
     rc, out, moved = do_quarantine(con, abspath, label, mount)
+    # A cópia que fica vai para o diário, não só para a tela. É a única
+    # informação que torna possível esvaziar a quarentena com segurança depois:
+    # "este saiu PORQUE aquele ficou". Sem ela, meses depois, a única saída é
+    # reconstruir o par por nome e tamanho -- que é candidato, não prova.
     con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,output) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (int(time.time()), "discard-clone", abspath, moved,
-                 "discard-clone", rc, out[:8000]))
+                 "discard-clone fica=%s" % guarda, rc, out[:8000]))
     con.commit()
     return {"ok": rc == 0, "path": abspath, "moved_to": moved, "bytes": tam,
             "kept": guarda, "output": out, "action": "discard-clone"}

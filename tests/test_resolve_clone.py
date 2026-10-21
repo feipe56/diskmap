@@ -284,6 +284,11 @@ def test_descartar_libera_e_desfaz():
         ok(r["bytes"] == len(ARQS["C/x.bin"]), "não reportou o espaço liberado")
         log = actions.log(con, 3)
         ok(log[0]["action"] == "discard-clone", "não registrou: %s" % log[0])
+        # Qual cópia ficou vai para o DIÁRIO, não só para a tela. Sem isso,
+        # esvaziar a quarentena meses depois só pode reconstruir o par por
+        # nome e tamanho — candidato, não prova.
+        ok(actions.quem_ficou(log[0]["argv"]) == a,
+           "o diário não diz qual cópia ficou: %r" % log[0]["argv"])
         if r["moved_to"]:
             actions.undo(con, log[0]["id"])
             ok(os.path.exists(b) and ler(b) == antes, "o undo não trouxe de volta")
@@ -428,6 +433,23 @@ def test_grupo_exige_que_a_escolhida_seja_do_grupo():
             ok(os.path.isfile(os.path.join(base, rel)), "mexeu em %s" % rel)
     finally:
         shutil.rmtree(base); con.close()
+
+
+def test_quem_ficou_distingue_nao_sei_de_nao_havia():
+    """Linha antiga do diário não tem a marca, e isso não é 'não havia cópia'.
+
+    Confundir as duas é o erro que esvazia uma quarentena achando que provou
+    alguma coisa.
+    """
+    ok(actions.quem_ficou("discard-clone fica=/v/x.mkv") == "/v/x.mkv",
+       "não leu o caminho registrado")
+    ok(actions.quem_ficou("discard-clone") is None,
+       "linha antiga tem de devolver None (= não sei)")
+    ok(actions.quem_ficou(None) is None, "argv vazio tem de devolver None")
+    ok(actions.quem_ficou("discard-clone fica=") is None,
+       "marca vazia não é um caminho")
+    ok(actions.quem_ficou("discard-clone fica=/v/com espaço.mkv")
+       == "/v/com espaço.mkv", "quebrou em caminho com espaço")
 
 
 def main():
