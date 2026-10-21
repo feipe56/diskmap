@@ -188,7 +188,13 @@ def _sips(args, size=0):
     """A 400 MB PSD at 18300x24900 needs more than the default budget, so the
     timeout scales with the file and caps at three minutes."""
     t = min(SIPS_TIMEOUT + size // (10 << 20), 180)
-    return subprocess.run(["sips", *args], capture_output=True, text=True, timeout=t)
+    # errors="replace", não text=True: o sips repete o nome do arquivo na
+    # mensagem de erro, e nome gravado em Mac Roman traz byte que não é UTF-8.
+    # Com decodificação estrita isso vira UnicodeDecodeError dentro do worker,
+    # sobe pelo ex.map e derruba a varredura inteira -- foi o que aconteceu às
+    # 06:06 de 2026-10-21, depois de duas horas, por causa de um arquivo.
+    return subprocess.run(["sips", *args], capture_output=True, timeout=t,
+                          encoding="utf-8", errors="replace")
 
 
 def _props(out):
@@ -365,7 +371,15 @@ def enrich(con, min_size=100_000, workers=8, include_dds=False, refresh=False,
 
     def work(item):
         fid, abspath, ext, relpath, name, size = item
-        res = process_one(fid, abspath, ext, f"{fid % 256:02x}/{fid}.jpg", size)
+        # `process_one` promete não levantar, e a promessa é cumprida aqui, não
+        # só escrita lá: o que escapar derruba o ex.map e com ele a varredura
+        # toda. Um arquivo estranho custa uma linha com nota, não a noite.
+        try:
+            res = process_one(fid, abspath, ext, f"{fid % 256:02x}/{fid}.jpg", size)
+        except Exception as e:                                   # noqa: BLE001
+            res = {"file": fid, "width": None, "height": None, "format": None,
+                   "dhash": None, "thumb": None,
+                   "note": "erro inesperado: %s: %s" % (type(e).__name__, e)}
         res["lib"] = classify(relpath, name, ext)
         return res
 
