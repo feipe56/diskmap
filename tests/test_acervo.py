@@ -11,7 +11,7 @@ Roda:  python3 tests/test_acervo.py
 import os, sqlite3, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from diskmap import acervo, db                                       # noqa: E402
+from diskmap import acervo, classify, db                             # noqa: E402
 
 # Medido em arquivos reais: o qlmanage pendurou 8s em cada um destes.
 PENDURAM = ["mkv", "avi", "wmv", "flv", "webm", "rtf", "zip", "rar", "7z",
@@ -114,6 +114,88 @@ def test_piso_de_tamanho():
     ok(gravados == ["grande.pdf"],
        "o piso devia deixar só o grande, gravou %s" % gravados)
     con.close()
+
+
+def test_audio_sem_capa_nao_vira_miniatura():
+    """O QuickLook devolve a própria nota musical para áudio sem capa: 6 KB
+    iguais para todo arquivo, indistinguíveis de uma capa de verdade na tela.
+    Gastar um processo por arquivo para produzir isso é pagar caro por um ícone
+    pior que o desenhado de graça — e que ainda mente, porque parece informação.
+
+    O `ffprobe` responde a pergunta real em 0,06s. Sem ele a resposta é "não
+    sei", e não saber significa não renderizar."""
+    import subprocess as sp
+    real = acervo.shutil.which
+    try:
+        acervo.shutil.which = lambda x: None          # fingindo máquina sem ffmpeg
+        ok(acervo.tem_capa("/qualquer.mp3") is None,
+           "sem ffprobe devia responder 'não sei'")
+        k, rel, eng, note = acervo.preview_one(1, __file__, "mp3", "audio")
+        ok(rel is None and eng == "nenhum",
+           "sem ffprobe não devia renderizar: %r/%r" % (rel, eng))
+        ok(note and "ffprobe" in note, "não explicou: %r" % note)
+    finally:
+        acervo.shutil.which = real
+    # com ffprobe presente, um arquivo que não é áudio não tem capa
+    if acervo.shutil.which("ffprobe"):
+        k, rel, eng, note = acervo.preview_one(1, __file__, "mp3", "audio")
+        ok(rel is None and eng == "sem-capa",
+           "arquivo sem capa devia parar antes do renderizador: %r/%r" % (rel, eng))
+
+
+# Nomes que a regra de sidecar precisa separar. O `.gitignore` e o `.env` estão
+# aqui porque a primeira versão desta regra os descartava: `_` é curinga em
+# LIKE, e um `'._%'` sem ESCAPE casa com todo arquivo que começa com ponto.
+SIDECARS = ["._notas.txt", "._foto.jpg", "._", "._a", "._.DS_Store"]
+NAO_SIDECARS = [".gitignore", ".env", ".bashrc", ".a.txt", "normal.txt",
+                "foto.jpg", "a._b.txt", ".", "", "_x.txt"]
+
+
+def test_sidecar_sql_casa_com_python():
+    """A regra existe duas vezes -- em Python e em SQL -- porque a consulta não
+    pode trazer 1,2 milhão de linhas só para filtrá-las. Duas cópias de uma
+    regra sempre divergem neste projeto, então a equivalência é um teste.
+    """
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE f (name TEXT)")
+    nomes = SIDECARS + NAO_SIDECARS
+    con.executemany("INSERT INTO f VALUES (?)", [(n,) for n in nomes])
+    passam = {r[0] for r in con.execute(
+        "SELECT name FROM f WHERE " + classify.sql_nao_sidecar("f.name"))}
+    for n in nomes:
+        py = not classify.eh_sidecar(n)
+        ok(py == (n in passam),
+           "SQL e Python discordam em %r: python=%s sql=%s"
+           % (n, py, n in passam))
+
+
+def test_sidecar_nao_descarta_dotfile():
+    """O erro que o ESCAPE evita, dito pelo nome."""
+    for n in [".gitignore", ".env", ".bashrc"]:
+        ok(not classify.eh_sidecar(n), "%s não é sidecar" % n)
+    for n in SIDECARS:
+        ok(classify.eh_sidecar(n), "%s é sidecar" % n)
+
+
+def test_pending_nao_oferece_sidecar():
+    """O filtro tem de estar na consulta que o enrich usa, não só na regra."""
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+      CREATE TABLE volumes (id INTEGER PRIMARY KEY, mount TEXT);
+      CREATE TABLE dirs (id INTEGER PRIMARY KEY, vol INTEGER, relpath TEXT);
+      CREATE TABLE files (id INTEGER PRIMARY KEY, vol INTEGER, dir INTEGER,
+                          name TEXT, size INTEGER, ext TEXT, cls TEXT);
+      INSERT INTO volumes VALUES (1, '/mnt');
+      INSERT INTO dirs VALUES (1, 1, 'pasta');
+      INSERT INTO files VALUES (1, 1, 1, 'relatorio.pdf', 10, 'pdf', 'doc');
+      INSERT INTO files VALUES (2, 1, 1, '._relatorio.pdf', 10, 'pdf', 'doc');
+      INSERT INTO files VALUES (3, 1, 1, '.gitignore.txt', 10, 'txt', 'doc');
+    """)
+    nomes = {os.path.basename(t[1]) for t in acervo.pending(con)}
+    ok("relatorio.pdf" in nomes, "o arquivo de verdade saiu da fila: %s" % nomes)
+    ok("._relatorio.pdf" not in nomes, "o sidecar entrou na fila: %s" % nomes)
+    ok(".gitignore.txt" in nomes, "dotfile virou sidecar: %s" % nomes)
 
 
 def main():

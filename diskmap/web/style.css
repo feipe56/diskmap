@@ -381,6 +381,15 @@ tr.det>td{background:var(--surface-2);padding:0}
   border:1px solid var(--line);background:var(--surface);color:var(--fg-2)}
 .chip:hover{border-color:var(--accent);color:var(--fg)}
 .chip.on{background:var(--accent);border-color:var(--accent);color:#fff;cursor:default}
+
+/* O campo de renomear ocupa o lugar do balão, com a mesma altura: se o balão
+   encolhe ou cresce ao virar campo, a fileira inteira pula e você perde de
+   vista qual etiqueta está editando. */
+.chipedit {
+  font: inherit; color: var(--fg-0); background: var(--bg-0);
+  border: 1px solid var(--accent); border-radius: 999px;
+  padding: 2px 10px; width: 14ch; max-width: 30ch; outline: none;
+}
 .chip button{all:unset;cursor:pointer;font-size:.9rem;line-height:1;opacity:.85;
   padding:0 1px}
 .chip button:hover{opacity:1}

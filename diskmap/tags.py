@@ -240,12 +240,31 @@ def desmarcar(con, nome, caminho):
 
 
 def renomear(con, antigo, novo):
+    """Rename a tag in place, keeping every path and every parent link.
+
+    Both sides are checked before writing. A rename of a tag that does not
+    exist used to report success while changing nothing -- the caller then
+    believed a name that was never there, which in the panel means the chip you
+    just renamed quietly goes back to the old name on the next load.
+
+    Only the name changes: `tag_paths` and the parent column point at the id,
+    so what the tag covers and where it sits in the tree survive untouched.
+    """
     ensure(con)
     a, b = _limpa(antigo), _limpa(novo)
+    if not b:
+        raise ValueError("o novo nome está vazio")
+    if _id(con, a) is None:
+        raise ValueError("etiqueta não existe: %s" % a)
+    if a.casefold() != b.casefold() and _id(con, b) is not None:
+        raise ValueError("já existe uma etiqueta chamada %s" % b)
     try:
-        con.execute("UPDATE tags SET name=? WHERE name=? COLLATE NOCASE", (b, a))
+        cur = con.execute("UPDATE tags SET name=? WHERE name=? COLLATE NOCASE",
+                          (b, a))
     except sqlite3.IntegrityError:
         raise ValueError("já existe uma etiqueta chamada %s" % b)
+    if not cur.rowcount:
+        raise ValueError("etiqueta não existe: %s" % a)
     con.commit()
     return {"ok": True, "de": a, "para": b}
 

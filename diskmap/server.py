@@ -83,9 +83,11 @@ def overlap(con, limit=40):
 # Imagens continuam vindo de `image_meta`, que sabe dimensão, biblioteca e hash
 # visual; o resto vem de `media_meta`, que só sabe mostrar. Uma consulta só
 # devolveria metade das colunas vazias para cada lado.
+# `gamedata` é a maior classe de um acervo com jogos — 1,6 TB aqui — e ficava
+# enterrada em "outro" junto com áudio e código. Categoria própria.
 TIPOS = {"imagem": ("image",), "documento": ("doc",), "video": ("video",),
-         "outro": ("audio", "archive", "code", "model3d", "binary",
-                   "gamedata", "ml_model", "db")}
+         "jogos": ("gamedata",), "musica": ("audio",),
+         "outro": ("archive", "code", "model3d", "binary", "ml_model", "db")}
 
 
 def acervo(con, q):
@@ -174,15 +176,21 @@ def acervo(con, q):
         list(classes))]
     # Quantos dos que faltam são alcançáveis: é esse o número que vale como
     # "gere o resto", e não o total sem miniatura.
+    #
+    # A fila é quem NÃO TEM LINHA, não quem está sem miniatura: `enrich` e
+    # `pending` pulam todo id que já consta na tabela, com miniatura ou sem.
+    # Contar por `thumb IS NULL` punha na fila quem já foi processado e decidido
+    # -- um áudio sem capa, um render que falhou -- e o número nunca descia,
+    # por mais que se rodasse o comando que ele manda rodar.
     if "image" in classes:
         faltam = con.execute(
             "SELECT COUNT(*) FROM files f LEFT JOIN image_meta im ON im.file=f.id "
-            "WHERE f.cls='image' AND im.thumb IS NULL").fetchone()[0]
+            "WHERE f.cls='image' AND im.file IS NULL").fetchone()[0]
     else:
         faltam = con.execute(
             "SELECT COUNT(*) FROM files f "
             "LEFT JOIN media_meta mm ON mm.file=f.id "
-            "WHERE f.cls IN (%s) AND mm.thumb IS NULL AND lower(f.ext) IN (%s)"
+            "WHERE f.cls IN (%s) AND mm.file IS NULL AND lower(f.ext) IN (%s)"
             % (",".join("?" * len(classes)), ",".join("?" * len(render))),
             list(classes) + render).fetchone()[0]
     comthumb = con.execute(

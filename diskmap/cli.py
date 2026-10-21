@@ -68,6 +68,43 @@ def cmd_plan(a):
     con.close()
 
 
+artistas_MAE = "Artistas"
+
+
+def _n(x):
+    """Número no formato daqui: 28.513, não 28,513."""
+    return "{:,}".format(x).replace(",", ".")
+
+
+def cmd_artistas(a):
+    from . import artistas
+    con = db.connect(a.db)
+    try:
+        lidos, achados = artistas.varrer(con, cls=a.cls, limit=a.limit,
+                                         workers=a.workers, refresh=a.refazer)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 2
+    print("metadado lido: %s arquivos, %s com artista" % (_n(lidos), _n(achados)))
+    plano, fora = artistas.plano(con, cls=a.cls, minimo=a.minimo)
+    alvos = sum(len(v) for v in plano.values())
+    print("plano: %s etiquetas cobrindo %s arquivos" % (_n(len(plano)), _n(alvos)))
+    if fora:
+        print("  %s artistas com menos de %d arquivo(s) ficaram de fora "
+              "(use --min 1 para incluir)" % (_n(fora), a.minimo))
+    for nome, caminhos in sorted(plano.items(), key=lambda kv: -len(kv[1]))[:20]:
+        print("    %-44s %s" % (nome[:44], _n(len(caminhos))))
+    if not a.aplicar:
+        print("\nensaio: nada foi gravado. Repita com --aplicar.")
+        return 0
+    criadas, marcadas, falhas = artistas.aplicar(con, plano, pai=a.mae)
+    print("gravado: %s etiquetas, %s caminhos, sob a mãe '%s'"
+          % (_n(criadas), _n(marcadas), a.mae))
+    for nome, erro in falhas[:10]:
+        print("  falhou %s: %s" % (nome, erro), file=sys.stderr)
+    return 0
+
+
 def cmd_acervo(a):
     from . import acervo
     con = db.connect(a.db)
@@ -443,6 +480,22 @@ def main(argv=None):
     s.add_argument("--min-size", type=int, default=0,
                    help="ignora arquivos menores que isto, em bytes")
     s.set_defaults(fn=cmd_acervo)
+
+    s = sub.add_parser("artistas", help="etiqueta por artista, lido do metadado "
+                                        "do próprio arquivo (precisa de ffprobe)")
+    s.add_argument("--aplicar", action="store_true",
+                   help="grava as etiquetas; sem isto é só ensaio")
+    s.add_argument("--min", type=int, default=2, dest="minimo",
+                   help="só cria etiqueta para artista com pelo menos N "
+                        "arquivos (default 2)")
+    s.add_argument("--mae", default=artistas_MAE,
+                   help="etiqueta-mãe das criadas (default Artistas)")
+    s.add_argument("--limit", type=int, default=None)
+    s.add_argument("--workers", type=int, default=6)
+    s.add_argument("--refazer", action="store_true",
+                   help="relê o metadado de quem já foi lido")
+    s.add_argument("--cls", default="audio")
+    s.set_defaults(fn=cmd_artistas)
 
     s = sub.add_parser("forget",
                        help="tira do índice um volume que não existe mais")

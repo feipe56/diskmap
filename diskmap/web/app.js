@@ -1454,8 +1454,8 @@ async function panelArvores() {
    terceiro num repositório GPL é uma pergunta de licença que ninguém quer
    responder depois. */
 const ACERVO_ABAS = [
-  ['imagem', 'Imagens'], ['documento', 'Documentos'],
-  ['video', 'Vídeos'], ['outro', 'Outros'],
+  ['imagem', 'Imagens'], ['documento', 'Documentos'], ['video', 'Vídeos'],
+  ['musica', 'Música'], ['jogos', 'Jogos'], ['outro', 'Outros'],
 ];
 let ACV_TIPO = 'imagem';
 const ACV_F = { vol: '', ext: '', sort: 'size', comthumb: '' };
@@ -1477,14 +1477,30 @@ const ICON_FAM = [
   [/^(c|h|cpp|cs|js|ts|py|java|go|rs|rb|php|sh|html|css|json|xml)$/, 'codigo', '#eab308'],
 ];
 
-function iconFor(ext) {
+/* Quando a extensão não diz nada, a CLASSE diz. O servidor já manda `cls`, que
+   sai de `classify.EXT2CLASS` — a lista verdadeira, com 63 extensões só de
+   empacotamento de jogo. Repetir essas 63 aqui era garantir divergência: na
+   primeira versão faltavam `dat`, `bsp`, `cache` e `pc`, e um `.dat` de 19 GB
+   dentro de um jogo saía com a folha genérica. */
+const ICON_CLS = {
+  gamedata: ['jogo', '#8b5cf6'], audio: ['audio', '#06b6d4'],
+  video: ['video', '#ec4899'], archive: ['caixa', '#a855f7'],
+  code: ['codigo', '#eab308'], binary: ['binario', '#64748b'],
+  doc: ['texto', '#3b82f6'], ml_model: ['binario', '#64748b'],
+  db: ['tabela', '#22c55e'], model3d: ['jogo', '#8b5cf6'],
+};
+
+function iconFor(ext, cls) {
   const e = (ext || '').toLowerCase();
   const fam = ICON_FAM.find(([re]) => re.test(e));
-  const [, nome, cor] = fam || [null, 'arquivo', 'var(--fg-3)'];
+  const porCls = ICON_CLS[cls];
+  const [nome, cor] = fam ? [fam[1], fam[2]]
+    : porCls || ['arquivo', 'var(--fg-3)'];
   const glifo = {
     pdf: 'PDF', texto: 'TXT', tabela: 'XLS', slides: 'PPT', caixa: 'ZIP',
-    audio: '♪', video: '▶', binario: 'EXE', codigo: '{ }', arquivo: '',
-  }[nome];
+    audio: '♪', video: '▶', binario: 'EXE', codigo: '{ }', jogo: '◆',
+    arquivo: '',
+  }[nome] || '';
   return `<svg viewBox="0 0 64 64" class="ficon" role="img"
     aria-label="${esc(e || 'arquivo')}">
     <path d="M14 4h26l12 12v44a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z"
@@ -1502,7 +1518,7 @@ async function panelAcervo() {
   const alvo = el('p-acervo');
   // O hash primeiro, sempre: a sub-aba e as etiquetas vêm dele, e calcular a
   // contagem antes de ler o filtro dava contagem do acervo inteiro.
-  // '#acervo:video&tag=Musica' é sub-aba 'video' filtrada por 'Séries'.
+  // '#acervo:video&tag=Musica' é sub-aba 'video' filtrada por 'Musica'.
   const pedido = ((location.hash || '').split(':')[1] || '').split('&')[0];
   if (pedido && ACERVO_ABAS.some(([k]) => k === pedido)) ACV_TIPO = pedido;
   lerTagsDoHash();
@@ -1593,7 +1609,7 @@ async function listaAcervo(corpo) {
         ${selCheck(r.abs)}
         <div class="cart-img">${r.thumb
           ? `<img src="/thumb/${r.id}.jpg" alt="" loading="lazy">`
-          : iconFor(r.ext)}${!r.thumb && r.pode && !r.note
+          : iconFor(r.ext, r.cls)}${!r.thumb && r.pode && !r.note
             ? '<span class="pend" title="o renderizador ainda não passou por este arquivo">na fila</span>'
             : ''}</div>
         <figcaption>
@@ -1891,10 +1907,54 @@ async function carregaTags() {
 }
 
 const balao = (n, ativa) => (ativa
-  ? `<span class="chip on">${esc(n)}
+  ? `<span class="chip on" data-chipnome="${esc(n)}" title="dois cliques para renomear">${esc(n)}
       <button data-chipoff="${esc(n)}" aria-label="tirar o filtro ${esc(n)}">×</button>
     </span>`
-  : `<button class="chip" data-chipon="${esc(n)}">${esc(n)}</button>`);
+  : `<button class="chip" data-chipon="${esc(n)}" data-chipnome="${esc(n)}"
+      title="dois cliques para renomear">${esc(n)}</button>`);
+
+/* Renomear no próprio balão, com dois cliques.
+   O balão apagado é um <button> que liga o filtro, então os dois cliques
+   ligariam o filtro e o redesenho comeria o campo antes de alguém digitar.
+   Por isso o clique simples espera: 220 ms, que some ao lado da consulta que
+   ele dispara, e o segundo clique cancela a espera. O balão aceso é um <span>
+   -- só o × dele clica -- e ali não há conflito nenhum para resolver. */
+function editaBalao(el, nome, redesenha) {
+  if (el.querySelector('input')) return;
+  const antes = el.innerHTML;
+  el.innerHTML = `<input class="chipedit" value="${esc(nome)}" maxlength="48"
+    aria-label="novo nome da etiqueta ${esc(nome)}">`;
+  const inp = el.querySelector('input');
+  inp.focus(); inp.select();
+  let pronto = false;
+  const desiste = () => { if (!pronto) { pronto = true; el.innerHTML = antes; } };
+  inp.addEventListener('keydown', async (ev) => {
+    ev.stopPropagation();
+    if (ev.key === 'Escape') { desiste(); return; }
+    if (ev.key !== 'Enter') return;
+    const novo = (inp.value || '').trim();
+    if (!novo || novo === nome) { desiste(); return; }
+    pronto = true;
+    inp.disabled = true;
+    try {
+      await post('/api/tag', { acao: 'rename', name: nome, novo });
+      // O filtro guarda NOMES: sem trocar aqui, renomear uma etiqueta ativa
+      // deixaria o painel filtrando por um nome que não existe mais, e a
+      // listagem viria vazia sem dizer por quê.
+      if (TAGS_ON.has(nome)) { TAGS_ON.delete(nome); TAGS_ON.add(novo); }
+      gravaTagsNoHash();
+      await carregaTags();
+      loaded.busca = false; loaded.acervo = false;
+      toast(`etiqueta renomeada para ${novo}`, 'ok');
+      redesenha();
+    } catch (e) {
+      toast(e.message, 'err');
+      pronto = false; inp.disabled = false; inp.focus();
+    }
+  });
+  inp.addEventListener('blur', desiste);
+  inp.addEventListener('click', (ev) => ev.stopPropagation());
+}
 
 /* Duas camadas: na primeira, as etiquetas-raiz; na segunda, as filhas das que
    estão ativas. A segunda linha só existe quando há filha para mostrar, e diz
@@ -1955,6 +2015,21 @@ const selCheck = (abs) => (!abs ? '' : `<input type="checkbox" class="selbox"
 
 const soPastas = () => [...SEL].every((p) => !/\.[A-Za-z0-9]{1,6}$/.test(p));
 
+/* As pastas que contêm o que está selecionado, sem repetir.
+   Dez arquivos da mesma pasta são UMA etiqueta, não dez: é esse o ganho da
+   operação, e sem a deduplicação ela seria só o mesmo trabalho com outro nome.
+   O que já é pasta entra como está — subir mais um nível alcançaria as pastas
+   irmãs, que ninguém pediu. */
+function pastasDaSelecao() {
+  const out = new Set();
+  SEL.forEach((p) => {
+    const ehPasta = !/\.[A-Za-z0-9]{1,6}$/.test(p);
+    const corte = p.lastIndexOf('/');
+    out.add(ehPasta || corte <= 0 ? p : p.slice(0, corte));
+  });
+  return [...out];
+}
+
 function barraSelecao() {
   if (!SEL.size) return '';
   return `<div class="selbar" role="region" aria-label="seleção">
@@ -1968,6 +2043,7 @@ function barraSelecao() {
         `<option value="${esc(t.name)}">dentro de ${esc(t.name)}</option>`).join('')}
     </select>
     <button class="btn primary" data-selgo="add">etiquetar</button>
+    <button class="btn" data-selpasta>etiquetar a pasta…</button>
     <button class="btn" data-selgo="remove">tirar</button>
     <button class="btn" data-selclear>limpar</button>
     <span class="selhint"${soPastas() ? ' hidden' : ''}>dica: etiquetar a
@@ -2038,6 +2114,12 @@ function ligaBotoesDaBarra(alvo, redesenha) {
     });
     sincronizaBarra(alvo, redesenha);
   });
+  const bp = alvo.querySelector('[data-selpasta]');
+  if (bp) bp.addEventListener('click', () => {
+    const nome = (alvo.querySelector('#selnome').value || '').trim();
+    if (!nome) { toast('escreva o nome da etiqueta', 'err'); return; }
+    folhaPasta(nome, alvo.querySelector('#selpai').value || null, alvo, redesenha);
+  });
   alvo.querySelectorAll('[data-selgo]').forEach((b) => b.addEventListener('click', async () => {
     const nome = (alvo.querySelector('#selnome').value || '').trim();
     if (!nome) { toast('escreva o nome da etiqueta', 'err'); return; }
@@ -2059,9 +2141,60 @@ function ligaBotoesDaBarra(alvo, redesenha) {
   }));
 }
 
+/* Etiquetar a pasta alcança o que NÃO está selecionado, e o que ainda nem
+   existe. Isso é justamente a utilidade — e justamente por isso é a única
+   operação de etiqueta que pede confirmação: o resto do painel só mexe no que
+   você marcou, e aqui o alcance passa do que está na tela. */
+function folhaPasta(nome, pai, alvo, redesenha) {
+  const pastas = pastasDaSelecao();
+  const mostra = pastas.slice(0, 12);
+  sheet().innerHTML = `<div class="sheet-in" role="dialog" aria-modal="true">
+    <h3>Etiquetar ${N(pastas.length)} pasta(s) como <b>${esc(nome)}</b></h3>
+    <div class="warnbox">A etiqueta fica na <b>pasta</b>, não nos arquivos: vale
+      para tudo que está dentro dela — inclusive o que você não selecionou e o
+      que entrar depois. ${pai ? `Fica dentro de <b>${esc(pai)}</b>.` : ''}</div>
+    ${mostra.map((p) => `<div class="sheet-path">${esc(p)}</div>`).join('')}
+    ${pastas.length > mostra.length
+      ? `<div class="sheet-path">… e mais ${N(pastas.length - mostra.length)}</div>` : ''}
+    <div class="sheet-foot">
+      <button class="btn" data-close>Cancelar</button>
+      <button class="btn primary" data-go>Etiquetar ${N(pastas.length)} pasta(s)</button>
+    </div></div>`;
+  sheet().hidden = false;
+  sheet().querySelector('[data-close]').addEventListener('click', closeSheet);
+  sheet().querySelector('[data-go]').addEventListener('click', async () => {
+    const b = sheet().querySelector('[data-go]');
+    b.disabled = true;
+    try {
+      const r = await post('/api/tag-bulk', { name: nome, paths: pastas, pai, acao: 'add' });
+      toast(r.output, r.ok ? 'ok' : 'err');
+      if (r.pulados && r.pulados.length) console.warn('caminhos recusados', r.pulados);
+      SEL.clear();
+      await carregaTags();
+      loaded.busca = false; loaded.acervo = false;
+      closeSheet();
+      redesenha();
+    } catch (e) {
+      toast(e.message, 'err');
+      b.disabled = false;
+    }
+  });
+}
+
 function ligaChips(alvo, redesenha) {
+  alvo.querySelectorAll('[data-chipnome]').forEach((el) => {
+    el.addEventListener('dblclick', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      clearTimeout(el._tLiga);
+      editaBalao(el, el.dataset.chipnome, redesenha);
+    });
+  });
   alvo.querySelectorAll('[data-chipon]').forEach((b) => b.addEventListener('click', () => {
-    TAGS_ON.add(b.dataset.chipon); gravaTagsNoHash(); redesenha();
+    if (b.querySelector('input')) return;
+    clearTimeout(b._tLiga);
+    b._tLiga = setTimeout(() => {
+      TAGS_ON.add(b.dataset.chipon); gravaTagsNoHash(); redesenha();
+    }, 220);
   }));
   alvo.querySelectorAll('[data-chipoff]').forEach((b) => b.addEventListener('click', () => {
     TAGS_ON.delete(b.dataset.chipoff); gravaTagsNoHash(); redesenha();

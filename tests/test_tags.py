@@ -125,7 +125,7 @@ def test_like_nao_vaza_para_a_pasta_vizinha():
 
 def test_subetiqueta_e_o_guarda_chuva_do_pai():
     """Filtrar pela mãe traz o que está na filha: 'Música' tem de incluir 'Ao vivo'.
-    O contrário não — filtrar 'Ao vivo' não traz o resto de Séries."""
+    O contrário não — filtrar 'Ao vivo' não traz o resto de 'Música'."""
     base, con = mundo()
     try:
         tags.marcar(con, "Música", os.path.join(base, "Audio/Discos"))
@@ -255,7 +255,7 @@ def test_etiquetas_de_um_caminho_incluem_as_herdadas():
         t = tags.do_caminho(con, os.path.join(base, "Audio/Discos/f1.mkv"))
         nomes = {x["name"]: x["herdada"] for x in t}
         ok(nomes == {"Favorito": False, "Música": True},
-           "esperava Favorito direta e Séries herdada, veio %s" % nomes)
+           "esperava Favorito direta e Música herdada, veio %s" % nomes)
     finally:
         shutil.rmtree(base); con.close()
 
@@ -272,6 +272,41 @@ def test_desmarcar_e_apagar():
         ok(tags.listar(con) == [], "apagar não removeu a etiqueta")
     finally:
         shutil.rmtree(base); con.close()
+
+
+def test_renomear_mantem_caminhos_filhas_e_recusa_fantasma():
+    """Renomear troca o nome e mais nada: o que a etiqueta cobre e onde ela
+    está na árvore apontam para o id, não para o texto.
+
+    E renomear o que não existe tem de FALHAR. Antes devolvia sucesso sem mudar
+    nada -- no painel isso é o balão que você acabou de renomear voltando ao
+    nome velho no próximo carregamento, sem erro nenhum para explicar."""
+    base, con = mundo()
+    try:
+        tags.marcar(con, "Música", os.path.join(base, "Audio/Discos"))
+        tags.marcar(con, "Ao vivo", os.path.join(base, "Video"), pai="Música")
+        antes = casam(con, "Música")
+        r = tags.renomear(con, "Música", "Sonora")
+        ok(r["para"] == "Sonora", "não renomeou: %s" % r)
+        ok(casam(con, "Sonora") == antes,
+           "o novo nome não cobre o mesmo: %s vs %s" % (casam(con, "Sonora"), antes))
+        filha = [t for t in tags.listar(con) if t["name"] == "Ao vivo"][0]
+        ok(filha["pai_nome"] == "Sonora",
+           "a filha perdeu a mãe: %s" % filha["pai_nome"])
+        for de, para, porque in (
+                ("Nao Existe", "X", "etiqueta fantasma"),
+                ("Sonora", "Ao vivo", "nome já ocupado"),
+                ("Sonora", "   ", "nome vazio")):
+            try:
+                tags.renomear(con, de, para)
+                ok(False, "aceitou renomear com %s" % porque)
+            except ValueError:
+                pass
+        ok([t["name"] for t in tags.listar(con) if t["name"] == "Sonora"],
+           "a árvore quebrou depois das recusas")
+    finally:
+        con.close()
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def main():

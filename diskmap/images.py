@@ -14,6 +14,7 @@ cheap.
 import os, re, struct, subprocess, sys, tempfile, time, zlib
 from concurrent.futures import ThreadPoolExecutor
 from . import db
+from .classify import sql_nao_sidecar
 
 THUMB_DIR = os.path.expanduser("~/.diskmap/thumbs")
 THUMB_PX = 320
@@ -323,7 +324,8 @@ def process_one(fid, abspath, ext, thumb_rel, size=0):
 def pending(con, min_size, include_dds, refresh):
     q = """SELECT f.id, f.name, f.ext, f.size, d.relpath, v.mount
            FROM files f JOIN dirs d ON d.id=f.dir JOIN volumes v ON v.id=f.vol
-           WHERE f.cls='image' AND f.size >= ? AND v.mount IS NOT NULL"""
+           WHERE f.cls='image' AND f.size >= ? AND v.mount IS NOT NULL
+             AND """ + sql_nao_sidecar("f.name")
     args = [min_size]
     if not include_dds:
         q += " AND f.ext NOT IN ('dds','ico')"

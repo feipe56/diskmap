@@ -29,7 +29,7 @@ and still under a timeout, because the next unknown format is always out there.
 import os, shutil, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import db
+from . import classify, db
 from .images import THUMB_DIR, THUMB_PX
 
 SCHEMA = """
@@ -134,6 +134,32 @@ def _ffmpeg(abspath, dest):
     return False
 
 
+def tem_capa(abspath):
+    """True when the audio file carries an embedded picture.
+
+    QuickLook renders audio, but for a file without cover art it returns its own
+    generic music note -- byte-identical every time, 6 KB, and indistinguishable
+    on screen from a real cover. Producing that costs a process per file
+    (~0.4s, which is three hours across a real music collection) to end up
+    worse than the icon the panel draws for free, because a fake cover tells
+    you nothing while looking like it does.
+
+    `ffprobe` answers the actual question in 0.06s. Without ffmpeg installed the
+    answer is "do not know", and not knowing means not rendering: the icon is
+    honest, the placeholder is not.
+    """
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v",
+                            "-show_entries", "stream_disposition=attached_pic",
+                            "-of", "default=nw=1:nk=1", abspath],
+                           capture_output=True, text=True, timeout=FF_TIMEOUT)
+        return "1" in (r.stdout or "")
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def preview_one(fid, abspath, ext, cls):
     """(cls, thumb_rel, engine, note) for one file. Never raises."""
     eng = engine_for(ext)
@@ -141,6 +167,13 @@ def preview_one(fid, abspath, ext, cls):
         return (cls, None, "nenhum", "sem renderizador para .%s" % (ext or "?"))
     if not os.path.isfile(abspath):
         return (cls, None, "ausente", "não está no disco")
+    if cls == "audio":
+        capa = tem_capa(abspath)
+        if capa is None:
+            return (cls, None, "nenhum", "sem ffprobe para saber se há capa "
+                                         "embutida; o painel desenha o ícone")
+        if not capa:
+            return (cls, None, "sem-capa", "não tem capa embutida")
     rel = _thumb_rel(fid)
     dest = os.path.join(THUMB_DIR, rel)
     try:
@@ -164,7 +197,8 @@ def pending(con, cls=None, limit=None, refresh=False):
     con.executescript(SCHEMA)
     q = ("SELECT f.id, f.ext, f.cls, f.size, v.mount, d.relpath, f.name "
          "FROM files f JOIN dirs d ON d.id=f.dir JOIN volumes v ON v.id=f.vol "
-         "WHERE v.mount IS NOT NULL AND f.cls IS NOT NULL AND f.cls <> 'image'")
+         "WHERE v.mount IS NOT NULL AND f.cls IS NOT NULL AND f.cls <> 'image'"
+         " AND " + classify.sql_nao_sidecar("f.name"))
     args = []
     if cls:
         q += " AND f.cls = ?"

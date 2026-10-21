@@ -306,6 +306,19 @@ Tudo pelo `sips`, que já vem no macOS. Ele lê todos os formatos deste acervo �
 dds, tga, psd, tif, exr, hdr, webp, bmp — mas **não extrai pixel de dds**, então dds fica
 com metadado e nunca ganha miniatura nem hash.
 
+### Sidecar do macOS nunca vira miniatura
+
+Em volume sem atributo estendido nativo, o macOS grava um irmão `._<original>`
+ao lado do arquivo: o fork AppleDouble. Ele herda a extensão do original, então
+`._notas.txt` parece texto e `._foto.jpg` parece imagem. Nenhum dos dois é.
+Renderizar um deles produz um retângulo de binário embaralhado que, na grade,
+não se distingue de um documento de verdade.
+
+Num acervo real isso não é detalhe: 1,2 milhão deles, um quinto da classe
+`doc` e um nono das imagens. O índice continua listando o sidecar — ele existe
+e ocupa espaço —, mas `images` e `acervo` não gastam um processo para
+desenhá-lo.
+
 O hash perceptual é um dHash de 64 bits: o `sips` renderiza um PNG 9×9 a partir da
 miniatura e o `zlib` da stdlib decodifica. Mesma imagem redimensionada dá distância baixa;
 imagem diferente dá distância alta. O agrupamento usa LSH em quatro faixas de 16 bits, o
@@ -344,11 +357,44 @@ Para marcar muita coisa de uma vez há seleção por caixa, com uma barra que
 etiqueta ou desetiqueta o conjunto inteiro — e que lembra, quando você selecionou
 arquivos soltos, que etiquetar a pasta costuma ser a resposta melhor.
 
+### Etiqueta por artista, lida do arquivo
+
+```bash
+python3 -m diskmap artistas              # ensaio: mostra o que criaria
+python3 -m diskmap artistas --aplicar    # grava, sob a mãe "Artistas"
+python3 -m diskmap artistas --min 1 --aplicar   # inclui artista de um arquivo só
+```
+
+Artista é o caso raro em que o juízo já está escrito: o arquivo diz quem fez.
+Lê com `ffprobe` (sem ele, o comando recusa e explica), guarda em `audio_meta`
+para ser retomável, e cria uma sub-etiqueta por artista dentro de `Artistas`.
+
+Duas coisas que a medida mudou no desenho óbvio. **A minoria dos arquivos tem o
+campo** — numa amostra de 120, 20 tinham artista; `.wav` quase nunca tem — então
+o relatório diz quantos ficaram mudos em vez de deixar a impressão de que o que
+foi etiquetado é o acervo. E **o campo não é limpo**: guarda `Unknown Artist`,
+nome de coletânea e a mesma banda em três grafias. Por isso há uma lista de
+não-artistas, o agrupamento ignora maiúscula, e o piso `--min 2` segura o avulso.
+
+Ensaio é o default, porque etiqueta é o único dado aqui que não se recalcula.
+
+Renomear uma etiqueta: **dois cliques no balão**. Só o nome muda — o que ela
+cobre e onde está na árvore apontam para o id, não para o texto.
+
 ## Acervo: o mesmo disco visto por tipo
 
 A aba **Acervo** responde "o que eu tenho?" separado em Imagens, Documentos,
-Vídeos e Outros, cada um com os filtros que fazem sentido — volume, formato,
-ordem, e "só com miniatura".
+Vídeos, Música, Jogos e Outros, cada um com os filtros que fazem sentido —
+volume, formato, ordem, e "só com miniatura". Jogos é categoria própria porque
+num acervo com jogos instalados ela costuma ser a maior de todas: empacotamento
+(`.pak`, `.rpf`, `.vpk`, `.ucas`) que nenhuma ferramenta abre e que, somado,
+pesa mais que o resto junto.
+
+Em **Música**, a miniatura é a capa embutida no arquivo — e só ela. O QuickLook
+devolve uma nota musical genérica para quem não tem capa, idêntica para todos e
+indistinguível de uma capa real na tela; o `ffprobe` responde se existe capa em
+0,06 s, contra 0,4 s para renderizar um ícone falso. Quem não tem capa fica com
+o ícone desenhado, que ao menos não finge.
 
 A miniatura é real sempre que a máquina souber fazê-la: o `qlmanage` do macOS
 renderiza a primeira página de um PDF ou de uma planilha e um quadro dos vídeos

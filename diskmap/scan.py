@@ -50,7 +50,7 @@ def scan_volume(con, mount, label, roots=None, rescan=False, progress=True,
         # Tags survive, because they are keyed by path and not by id. That is
         # the only reason they can: user-authored data is the one thing here
         # that no amount of rescanning can recompute.
-        for _t in ("file_hash", "image_meta", "media_meta"):
+        for _t in ("file_hash", "image_meta", "media_meta", "audio_meta"):
             try:
                 con.execute("DELETE FROM %s WHERE file IN "
                             "(SELECT id FROM files WHERE vol=?)" % _t, (vol,))

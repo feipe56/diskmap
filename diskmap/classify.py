@@ -86,3 +86,27 @@ def classify(ext):
     if not ext:
         return "sem_ext"
     return EXT2CLASS.get(ext, "outros")
+
+
+# --- sidecars macOS deixa ao lado do arquivo de verdade ---------------------
+#
+# Em volume sem suporte nativo a atributo estendido, o macOS grava um irmão
+# chamado '._<original>': o fork AppleDouble. Ele herda a extensão do original,
+# então '._notas.txt' parece texto e o previsualizador renderiza o conteúdo
+# binário dele como texto embaralhado; '._foto.jpg' não é imagem nenhuma. São
+# 1,2 milhão deles nesses volumes -- um quinto da classe `doc` e um nono das
+# imagens. Nada aqui apaga sidecar: ele só nunca é previsualizado.
+def eh_sidecar(name):
+    return (name or "").startswith("._")
+
+
+def sql_nao_sidecar(col="f.name"):
+    """A mesma regra em SQL, para a consulta não trazer um milhão de linhas
+    para o Python só para aplicá-la.
+
+    O sublinhado vai escapado de propósito: em LIKE ele casa com qualquer
+    caractere, então um `'._%'` solto descarta silenciosamente todo arquivo
+    que começa com ponto -- `.gitignore`, `.env`, `.bashrc`. O teste
+    test_sidecar_sql_casa_com_python guarda essa equivalência.
+    """
+    return r"%s NOT LIKE '.\_%%' ESCAPE '\'" % col
