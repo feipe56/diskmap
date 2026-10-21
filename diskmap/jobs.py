@@ -13,12 +13,16 @@ import json, os, re, subprocess, sys, threading, time
 from collections import deque
 
 MAX_LOG = 4000          # lines kept per job
-LABEL_OK = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
-NAME_OK = re.compile(r"^[A-Za-z0-9._-]{1,60}$")
+# O primeiro caractere não pode ser '-': nada passa por shell aqui, mas o valor
+# entra num argv e o argparse lê '-x' como opção, não como o rótulo. O erro
+# resultante fala de argumento faltando e não do campo que a pessoa preencheu.
+LABEL_OK = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,39}$")
+NAME_OK = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,59}$")
 
 # Jobs that write to the index. Only one runs at a time, so they never fight over
 # the database; read-only jobs are unrestricted.
-EXCLUSIVE = {"scan", "import", "analyze", "verify", "images", "acervo"}
+EXCLUSIVE = {"scan", "import", "analyze", "verify", "images", "acervo",
+             "reconciliar"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS job_log (
@@ -104,6 +108,32 @@ class Runner:
                 argv += ["--exclude", x]
             if p.get("rescan"):
                 argv.append("--rescan")
+            return argv
+
+        if kind == "reconciliar":
+            # Mesma validação do scan: o mount e as raízes entram num argv, e
+            # argv montado a partir do navegador é como se ganha execução
+            # arbitrária. `..` é recusado para a raiz não escapar do volume.
+            mount = os.path.abspath(os.path.expanduser(str(p.get("mount", ""))))
+            if not os.path.isdir(mount):
+                raise ValueError(f"não é uma pasta: {mount}")
+            label = str(p.get("label") or os.path.basename(mount.rstrip("/")) or "vol")
+            label = label.replace(" ", "_")
+            if not LABEL_OK.match(label):
+                raise ValueError("rótulo inválido (use letras, números, . _ -)")
+            argv = base + ["reconciliar", mount, "--label", label]
+            for r in p.get("roots") or []:
+                r = str(r).strip().strip("/")
+                if not r or ".." in r.split("/"):
+                    raise ValueError(f"subpasta inválida: {r}")
+                argv += ["--root", r]
+            for x in p.get("exclude") or []:
+                x = str(x).strip()
+                if not x or "/" in x:
+                    raise ValueError("exclude é um nome de pasta, sem barra")
+                argv += ["--exclude", x]
+            if p.get("aplicar"):
+                argv.append("--aplicar")
             return argv
 
         if kind == "analyze":

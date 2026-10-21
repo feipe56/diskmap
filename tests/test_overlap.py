@@ -49,8 +49,8 @@ def build():
         return con.execute("SELECT last_insert_rowid() i").fetchone()["i"]
 
     # O par clonado: mesmos três nomes e tamanhos dos dois lados.
-    a = d(1, "All/Filmes")
-    b = d(2, "Filmes/Aventura")
+    a = d(1, "All/Acervo")
+    b = d(2, "Acervo/Ramo")
     ids = {}
     for nome in ("um.mkv", "dois.mkv", "tres.mkv"):
         ids[nome] = (f(a, 1, nome), f(b, 2, nome))
@@ -88,19 +88,19 @@ def test_conta_bate_com_o_agregado(con):
 
 
 def test_o_par_clonado_traz_os_tres(con):
-    r = overlap_files(con, "disco/um/All/Filmes", "dois/Filmes/Aventura")
+    r = overlap_files(con, "disco/um/All/Acervo", "dois/Acervo/Ramo")
     nomes = sorted(x["name"] for x in r["rows"])
     ok(nomes == ["dois.mkv", "tres.mkv", "um.mkv"],
        "esperava os três clonados, veio %s" % nomes)
     ok(r["bytes"] == 3 * GRANDE, "bytes somados errados: %d" % r["bytes"])
-    ok(all(x["a_path"].startswith("All/Filmes/") for x in r["rows"]),
+    ok(all(x["a_path"].startswith("All/Acervo/") for x in r["rows"]),
        "o caminho do lado A não é o da árvore A")
-    ok(all(x["b_path"].startswith("Filmes/Aventura/") for x in r["rows"]),
+    ok(all(x["b_path"].startswith("Acervo/Ramo/") for x in r["rows"]),
        "o caminho do lado B não é o da árvore B")
 
 
 def test_miudo_fica_de_fora(con):
-    r = overlap_files(con, "disco/um/All/Filmes", "dois/Filmes/Aventura")
+    r = overlap_files(con, "disco/um/All/Acervo", "dois/Acervo/Ramo")
     ok(not [x for x in r["rows"] if x["name"] == "miudo.mkv"],
        "arquivo abaixo de MIN_FP_SIZE entrou na lista")
 
@@ -133,9 +133,9 @@ def test_like_nao_vaza_entre_irmas(con):
 
 
 def test_split_tree(con):
-    ok(split_tree(con, "disco/um/All/Filmes") == (1, "All/Filmes"),
+    ok(split_tree(con, "disco/um/All/Acervo") == (1, "All/Acervo"),
        "rótulo com barra não foi resolvido: %s"
-       % (split_tree(con, "disco/um/All/Filmes"),))
+       % (split_tree(con, "disco/um/All/Acervo"),))
     ok(split_tree(con, "dois/(raiz)") == (2, ""),
        "(raiz) devia virar prefixo vazio: %s" % (split_tree(con, "dois/(raiz)"),))
     ok(split_tree(con, "inexistente/x") is None,

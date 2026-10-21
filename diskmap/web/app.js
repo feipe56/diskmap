@@ -422,6 +422,22 @@ const CMDS = [
     go: 'Indexar',
   },
   {
+    kind: 'reconciliar', title: 'Conferir o índice com o disco', cid: 'reconciliar',
+    desc: 'Diz o que sumiu, apareceu ou mudou desde a última varredura. Ensaio: '
+      + 'só escreve se você marcar abaixo. Ao contrário de "descartar o índice", '
+      + 'quem não mudou mantém a miniatura e o hash que já tem.',
+    fields: [
+      { k: 'mount', label: 'volume', type: 'mount' },
+      { k: 'label', label: 'rótulo', type: 'text', hint: 'em branco usa o nome da pasta' },
+      { k: 'roots', label: 'só estas subpastas', type: 'list',
+        hint: 'separadas por vírgula; em branco confere o volume todo' },
+      { k: 'exclude', label: 'ignorar pastas com estes nomes', type: 'list' },
+      { k: 'aplicar', label: 'aplicar no índice (sem isto é só relatório)',
+        type: 'check' },
+    ],
+    go: 'Conferir',
+  },
+  {
     kind: 'analyze', title: 'Recalcular achados', cid: 'analyze',
     desc: 'Refaz rollups, duplicatas, árvores clonadas e pares compactado+extraído. '
       + 'Não perde a verificação por hash: ela é derivada dos hashes já gravados.',

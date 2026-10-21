@@ -437,7 +437,8 @@ Hash desatualizado é pior que hash nenhum: parece prova. Etiqueta nunca é
 tocada — ela é por caminho, e é o único dado aqui que varredura nenhuma
 recomputa.
 
-Ensaio é o padrão; só escreve com `--aplicar`.
+Ensaio é o padrão; só escreve com `--aplicar`. No painel ele é a tarefa
+**Conferir o índice com o disco**, com a mesma caixa de aplicar desmarcada.
 
 **Árvores clonadas.** Ferramenta de duplicata acha arquivo repetido. Ela não te diz
 que a pasta de build de um projeto seu e a instalação que o Steam mantém são 96% a
