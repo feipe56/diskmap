@@ -22,6 +22,16 @@ Três conjuntos, e cada um com uma consequência diferente:
              caminho é o mesmo arquivo), mas as laterais SAEM: a miniatura e o
              hash descrevem o conteúdo velho, e um hash desatualizado é pior
              que hash nenhum, porque parece prova.
+  guardado   está no índice, não está na caminhada, e o DIÁRIO DE AÇÕES diz
+             por quê: a própria ferramenta o mandou para a quarentena ou para
+             a Lixeira. Não é ausência, é um lugar que `classify.SKIP_DIRS`
+             esconde do scanner de propósito (decisão 23). Nada sai do índice.
+
+A quarta categoria existe porque sem ela o reconciliador mentia sobre o acervo
+real: num volume de 591 mil arquivos, 70 dos 109 "sumiram" eram os 89,5 GB
+da quarentena, e aplicar teria apagado o id -- com ele o hash e a miniatura --
+de arquivos que estão no disco e que o Histórico ainda pode devolver. "Sumiu"
+autoriza esquecer; "guardado" não.
 
 Etiqueta nunca é tocada. Ela é por (rótulo do volume, caminho) e sobrevive a
 tudo -- é o único dado aqui que nenhuma varredura recomputa.
@@ -70,17 +80,30 @@ def _no_indice(con, vol, raizes):
 
 
 def comparar(con, mount, vol, raizes=("",), exclude=()):
-    """(sumiu, apareceu, mudou) sem escrever nada."""
+    """(sumiu, apareceu, mudou, guardado) sem escrever nada.
+
+    `guardado` sai do diário de ações, não da caminhada: é o que esta
+    ferramenta tirou do lugar e sabe onde pôs. Ele é subtraído de `sumiu`
+    porque as consequências são opostas -- ver a docstring do módulo.
+    """
+    from . import actions as _act
     disco = _no_disco(con, mount, vol, raizes, exclude)
     indice = _no_indice(con, vol, list(raizes))
-    sumiu = [(k, v[0]) for k, v in indice.items() if k not in disco]
+    fora = _act.fora_do_lugar(con)
+    ausentes = [(k, v[0]) for k, v in indice.items() if k not in disco]
+    sumiu, guardado = [], []
+    for (rel, nome), fid in ausentes:
+        abspath = os.path.join(mount, ("%s/%s" % (rel, nome)).lstrip("/"))
+        onde = fora.get(abspath)
+        (guardado if onde else sumiu).append(
+            ((rel, nome), fid, onde) if onde else ((rel, nome), fid))
     apareceu = [(k, disco[k]) for k in disco if k not in indice]
     mudou = []
     for k, (fid, tam, mt) in indice.items():
         d = disco.get(k)
         if d and (d[0] != tam or d[1] != mt):
             mudou.append((k, fid, (tam, mt), (d[0], d[1]), d[2], d[3]))
-    return sumiu, apareceu, mudou
+    return sumiu, apareceu, mudou, guardado
 
 
 def _apaga_laterais(con, ids):
@@ -139,14 +162,17 @@ def reconciliar(con, mount, label, raizes=("",), exclude=(), aplicar_=False,
     t0 = time.time()
     if progress:
         print("caminhando %s…" % mount, file=sys.stderr)
-    sumiu, apareceu, mudou = comparar(con, mount, vol, raizes, exclude)
+    sumiu, apareceu, mudou, guardado = comparar(con, mount, vol, raizes,
+                                                exclude)
     if progress:
-        print("  %s: %d sumiram · %d apareceram · %d mudaram · %.0fs"
-              % (label, len(sumiu), len(apareceu), len(mudou),
+        print("  %s: %d sumiram · %d apareceram · %d mudaram · "
+              "%d guardados · %.0fs"
+              % (label, len(sumiu), len(apareceu), len(mudou), len(guardado),
                  time.time() - t0), file=sys.stderr)
         for titulo, itens in (("sumiram", [k for k, _ in sumiu]),
                               ("apareceram", [k for k, _ in apareceu]),
-                              ("mudaram", [m[0] for m in mudou])):
+                              ("mudaram", [m[0] for m in mudou]),
+                              ("guardados", [g[0] for g in guardado])):
             for rel, nome in itens[:limite_mostra]:
                 print("    %-10s %s" % (titulo[:-1],
                                         ("%s/%s" % (rel, nome)).lstrip("/")),
@@ -154,15 +180,25 @@ def reconciliar(con, mount, label, raizes=("",), exclude=(), aplicar_=False,
             if len(itens) > limite_mostra:
                 print("    %-10s … e mais %d" % ("", len(itens) - limite_mostra),
                       file=sys.stderr)
+    if guardado and progress:
+        # Dito em voz alta porque a ação certa aqui não é reconciliar: é a aba
+        # Histórico, que devolve, ou a decisão de esvaziar a quarentena.
+        por_onde = {}
+        for _k, _f, onde in guardado:
+            por_onde[onde] = por_onde.get(onde, 0) + 1
+        print("  %s: %s — o índice MANTÉM estes, com hash e miniatura."
+              % (label, " · ".join("%d na %s" % (n, o)
+                                   for o, n in sorted(por_onde.items()))),
+              file=sys.stderr)
     if not aplicar_:
         if progress:
             print("ensaio: nada foi escrito. Repita com --aplicar.",
                   file=sys.stderr)
-        return sumiu, apareceu, mudou, None
+        return sumiu, apareceu, mudou, guardado, None
     efeito = aplicar(con, vol, sumiu, apareceu, mudou)
     if progress:
         print("aplicado: %d linhas removidas, %d acrescentadas, %d atualizadas, "
               "%d laterais descartadas" % efeito, file=sys.stderr)
         print("rode `analyze` para os achados refletirem o disco.",
               file=sys.stderr)
-    return sumiu, apareceu, mudou, efeito
+    return sumiu, apareceu, mudou, guardado, efeito

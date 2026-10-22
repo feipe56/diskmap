@@ -66,7 +66,7 @@ def test_nao_mexe_em_nada_quando_nada_mudou():
     raiz, con = mundo()
     try:
         antes = ids(con)
-        s, a, m, ef = reconciliar.reconciliar(con, raiz, "VOL", progress=False)
+        s, a, m, g, ef = reconciliar.reconciliar(con, raiz, "VOL", progress=False)
         ok(not s and not a and not m,
            "inventou mudança: %d/%d/%d" % (len(s), len(a), len(m)))
         ok(ef is None, "ensaio não devia ter aplicado nada")
@@ -83,7 +83,7 @@ def test_ensaio_nao_escreve():
         os.remove(os.path.join(raiz, "acervo/um.mkv"))
         antes = ids(con)
         n_mm = con.execute("SELECT COUNT(*) c FROM media_meta").fetchone()["c"]
-        s, a, m, ef = reconciliar.reconciliar(con, raiz, "VOL", progress=False)
+        s, a, m, g, ef = reconciliar.reconciliar(con, raiz, "VOL", progress=False)
         ok(len(s) == 1, "não viu o arquivo que sumiu: %r" % s)
         ok(ef is None, "ensaio aplicou")
         ok(ids(con) == antes, "ensaio mexeu no índice")
@@ -146,7 +146,7 @@ def test_quem_mudou_mantem_id_mas_perde_a_lateral():
         with open(alvo, "w") as fh:
             fh.write("conteudo completamente diferente e maior")
         os.utime(alvo, (time.time() + 60, time.time() + 60))
-        s, a, m, _ = reconciliar.reconciliar(con, raiz, "VOL", aplicar_=True,
+        s, a, m, g, _ = reconciliar.reconciliar(con, raiz, "VOL", aplicar_=True,
                                              progress=False)
         ok(len(m) == 1 and not s and not a,
            "classificou errado: %d sumiu, %d apareceu, %d mudou"
@@ -205,7 +205,7 @@ def test_raiz_limitada_nao_declara_o_resto_sumido():
     """
     raiz, con = mundo()
     try:
-        s, a, m, _ = reconciliar.reconciliar(con, raiz, "VOL", raizes=("acervo",),
+        s, a, m, g, _ = reconciliar.reconciliar(con, raiz, "VOL", raizes=("acervo",),
                                              progress=False)
         ok(not s, "declarou sumido o que está fora do recorte: %r" % s)
         ok(not a and not m, "inventou mudança no recorte: %r %r" % (a, m))
@@ -229,10 +229,96 @@ def test_pasta_com_sublinhado_nao_puxa_a_irma():
             with open(os.path.join(raiz, p, "dentro", "x.mkv"), "w") as fh:
                 fh.write(p)
         scan.scan_volume(con, raiz, "VOL", rescan=True, progress=False)
-        s, a, m, _ = reconciliar.reconciliar(con, raiz, "VOL", raizes=("a_b",),
+        s, a, m, g, _ = reconciliar.reconciliar(con, raiz, "VOL", raizes=("a_b",),
                                              progress=False)
         ok(not s and not a and not m,
            "o recorte 'a_b' vazou para a irmã 'axb': %r %r %r" % (s, a, m))
+    finally:
+        shutil.rmtree(raiz, ignore_errors=True)
+        con.close()
+
+
+def _mandar_para_quarentena(con, raiz, rel):
+    """Reproduz o que `actions.quarantine` faz: rename para dentro do volume,
+    na pasta que `classify.SKIP_DIRS` esconde do scanner, e uma linha no diário.
+
+    O destino é o caminho literal de propósito -- é assim que a quarentena
+    existe no acervo real, e é por estar em SKIP_DIRS que a caminhada não a vê.
+    """
+    from diskmap import actions
+    import time as _t
+    origem = os.path.join(raiz, rel)
+    destino = os.path.join(raiz, ".diskmap-quarantine", rel)
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    os.rename(origem, destino)
+    actions.ensure_log(con)
+    con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,output)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (int(_t.time()), "quarantine", origem, destino, "quarantine", 0, ""))
+    con.commit()
+    return origem
+
+
+def test_quarentena_nao_e_sumico():
+    """O que a ferramenta guardou ela sabe onde está: não pode virar ausência.
+
+    Sem isto, reconciliar um volume com quarentena apaga do índice os arquivos
+    (89,5 GB) que estão na quarentena -- e com o id iriam o hash e a miniatura
+    de arquivos que o Histórico ainda pode devolver.
+    """
+    raiz, con = mundo()
+    try:
+        fid = ids(con)[("acervo", "tres.mkv")]
+        _mandar_para_quarentena(con, raiz, "acervo/tres.mkv")
+        s, a, m, g, _ = reconciliar.reconciliar(con, raiz, "VOL", progress=False)
+        ok(not s, "chamou de sumido o que está na quarentena: %r" % (s,))
+        ok(len(g) == 1, "não reconheceu o guardado: %r" % (g,))
+        if g:
+            ok(g[0][2] == "quarentena", "classificou o lugar errado: %r" % (g,))
+        ok(not a and not m, "inventou mudança: %r %r" % (a, m))
+    finally:
+        shutil.rmtree(raiz, ignore_errors=True)
+        con.close()
+
+
+def test_aplicar_nao_apaga_o_que_esta_na_quarentena():
+    """A consequência, que é o ponto: id, hash e miniatura sobrevivem."""
+    raiz, con = mundo()
+    try:
+        fid = ids(con)[("acervo", "tres.mkv")]
+        _mandar_para_quarentena(con, raiz, "acervo/tres.mkv")
+        reconciliar.reconciliar(con, raiz, "VOL", aplicar_=True, progress=False)
+        ok(("acervo", "tres.mkv") in ids(con),
+           "apagou do índice um arquivo que está na quarentena")
+        for t in ("media_meta", "file_hash"):
+            ok(con.execute("SELECT COUNT(*) c FROM %s WHERE file=?" % t,
+                           (fid,)).fetchone()["c"] == 1,
+               "perdeu %s de arquivo guardado — o trabalho de hash foi embora" % t)
+    finally:
+        shutil.rmtree(raiz, ignore_errors=True)
+        con.close()
+
+
+def test_desfeito_volta_a_ser_arquivo_normal():
+    """`undo` devolve o arquivo; aí não é guardado nem sumido, é presente.
+
+    O diário não apaga a linha da quarentena, grava outra -- então quem lê só
+    pela ação encontraria o arquivo "na quarentena" para sempre.
+    """
+    raiz, con = mundo()
+    try:
+        origem = _mandar_para_quarentena(con, raiz, "acervo/tres.mkv")
+        os.rename(os.path.join(raiz, ".diskmap-quarantine", "acervo/tres.mkv"),
+                  origem)
+        import time as _t
+        con.execute("INSERT INTO action_log (at,action,path,moved_to,argv,rc,"
+                    "output) VALUES (?,?,?,?,?,?,?)",
+                    (int(_t.time()) + 1, "undo", origem, "", "undo", 0, ""))
+        con.commit()
+        s, a, m, g, _ = reconciliar.reconciliar(con, raiz, "VOL", progress=False)
+        ok(not s and not a and not m and not g,
+           "o arquivo devolvido não voltou a ser normal: %r %r %r %r"
+           % (s, a, m, g))
     finally:
         shutil.rmtree(raiz, ignore_errors=True)
         con.close()
