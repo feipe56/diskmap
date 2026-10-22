@@ -244,10 +244,29 @@ def resolve_target(con, raw):
 
 
 def _move(src, dst):
+    """Rename that never overwrites.
+
+    The disambiguator needs a loop, not one attempt: `int(time.time())` has
+    one-second resolution and a same-filesystem rename is instant, so moving
+    three files with the same basename inside one second produced the same
+    destination twice -- and `os.rename` overwrites in silence. Found while
+    emptying a quarantine that had four pairs of repeated names; with the old
+    code a third of a kind would have destroyed the second.
+
+    `lexists`, not `exists`: a dangling symlink at the destination answers
+    False to `exists` and would be silently replaced.
+    """
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if os.path.exists(dst):
+    if os.path.lexists(dst):
         stem, ext = os.path.splitext(dst)
-        dst = f"{stem}.{int(time.time())}{ext}"
+        marca, n = int(time.time()), 0
+        while True:
+            cand = (f"{stem}.{marca}{ext}" if n == 0
+                    else f"{stem}.{marca}-{n}{ext}")
+            if not os.path.lexists(cand):
+                dst = cand
+                break
+            n += 1
     os.rename(src, dst)      # same filesystem by construction: instant
     return dst
 
@@ -259,9 +278,18 @@ def do_quarantine(con, abspath, label, mount):
 
 
 def do_trash(con, abspath, label, mount):
-    """Finder's own delete, so the item keeps 'Put Back'."""
+    r"""Finder's own delete, so the item keeps 'Put Back'.
+
+    `ensure_ascii=False` is the whole point of spelling the dump out: by
+    default `json.dumps` turns every non-ASCII character into a `\uXXXX`
+    escape, and AppleScript has no `\u` escape -- it reports a syntax error at
+    that offset. So every accented path failed here and fell through to the
+    fallback below, losing 'Put Back' silently. In a pt-BR archive that is most
+    paths: 44.346 of them in the one this was found on. JSON quoting is still
+    right for the quote and backslash cases, which is why it stays.
+    """
     script = ('tell application "Finder" to delete POSIX file %s'
-              % json.dumps(abspath))
+              % json.dumps(abspath, ensure_ascii=False))
     r = subprocess.run(["osascript", "-e", script], capture_output=True,
                        text=True, timeout=TIMEOUT)
     if r.returncode != 0:
